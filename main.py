@@ -1,5 +1,6 @@
 # coding: utf-8
 
+import jpholiday
 import pandas as pd
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service as ChromeService
@@ -115,7 +116,8 @@ def send_lark_success_card(details):
 
 def get_next_business_day():
     next_day = datetime.date.today() + datetime.timedelta(days=1)
-    while next_day.weekday() >= 5:
+    # 土日（>=5）または日本の祝日の場合は翌日に進める
+    while next_day.weekday() >= 5 or jpholiday.is_holiday(next_day):
         next_day += datetime.timedelta(days=1)
     return next_day
 
