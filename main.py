@@ -13,6 +13,7 @@ import time
 import os
 import shutil
 import datetime
+from datetime import timezone, timedelta
 import logging
 import requests
 from pathlib import Path
@@ -28,10 +29,21 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 
+# --- 日本時間(JST)の設定 ---
+JST = timezone(timedelta(hours=9))
+def jst_now(): return datetime.datetime.now(JST)
+
 # --- 設定情報 ---
 BASIS_USERNAME = os.getenv('BASIS_USERNAME', '')
 BASIS_PASSWORD = os.getenv('BASIS_PASSWORD', '')
-LARK_WEBHOOK_URL = "https://open.larksuite.com/open-apis/bot/v2/hook/3827abd3-eb1b-41b3-8df3-e920884d2d30"
+LARK_WEBHOOK_URL = os.getenv('LARK_WEBHOOK_URL', "https://open.larksuite.com/open-apis/bot/v2/hook/3827abd3-eb1b-41b3-8df3-e920884d2d30")
+
+# Lark API 認証情報
+LARK_APP_ID = os.getenv('LARK_APP_ID', "cli_aac716ae45b81e14")
+LARK_APP_SECRET = os.getenv('LARK_APP_SECRET', '')
+LARK_WIKI_TOKEN = "Ykm6w1c70iDJ0kkmM68jPcf5pEf"
+# テンプレート用FormatシートのID
+DEFAULT_SHEET_ID = "Yb6Zwo"
 
 FIXED_COMPANY_NAME = "ベイシス株式会社 IoT推進部"
 
@@ -97,21 +109,189 @@ def get_region_from_address(address):
     if match: return f"その他（{match.group(1).strip()}）"
     return "不明"
 
-def send_lark_success_card(details):
+# --- Lark API 連携処理 (スプレッドシートへの追記＆Formatからの自動複製) ---
+def get_lark_tenant_access_token():
+    url = "https://open.larksuite.com/open-apis/auth/v3/tenant_access_token/internal"
+    headers = {"Content-Type": "application/json; charset=utf-8"}
+    body = {"app_id": LARK_APP_ID, "app_secret": LARK_APP_SECRET}
+    try:
+        res = requests.post(url, headers=headers, json=body, timeout=10)
+        res_json = res.json()
+        if res_json.get("code") == 0:
+            return res_json.get("tenant_access_token")
+        logging.error(f"Lark API Token取得失敗: {res_json}")
+    except Exception as e:
+        logging.error(f"Lark API接続エラー: {e}")
+    return None
+
+def get_spreadsheet_token(tenant_token):
+    url = f"https://open.larksuite.com/open-apis/wiki/v2/spaces/get_node?token={LARK_WIKI_TOKEN}"
+    headers = {"Authorization": f"Bearer {tenant_token}"}
+    try:
+        res = requests.get(url, headers=headers, timeout=10)
+        res_json = res.json()
+        if res_json.get("code") == 0:
+            return res_json.get("data", {}).get("node", {}).get("obj_token", LARK_WIKI_TOKEN)
+    except Exception as e:
+        logging.warning(f"Wikiノード取得エラー（直接Wikiトークンを使用します）: {e}")
+    return LARK_WIKI_TOKEN
+
+def write_to_lark_sheet(extracted_data):
+    tenant_token = get_lark_tenant_access_token()
+    if not tenant_token:
+        logging.warning("Lark APIトークンが取得できなかったため、シート書き込みをスキップします。")
+        return
+
+    spreadsheet_token = get_spreadsheet_token(tenant_token)
+    headers = {
+        "Authorization": f"Bearer {tenant_token}",
+        "Content-Type": "application/json; charset=utf-8"
+    }
+
+    now = jst_now()
+    target_sheet_title = f"{now.year}年{now.month}月"
+    sheet_id = None
+
+    # 当月タブ（例: 2026年9月）の ID を自動検索
+    try:
+        sheets_url = f"https://open.larksuite.com/open-apis/sheets/v3/spreadsheets/{spreadsheet_token}/sheets/query"
+        res_sheets = requests.get(sheets_url, headers=headers, timeout=10)
+        if res_sheets.status_code == 200:
+            sheets_list = res_sheets.json().get("data", {}).get("sheets", [])
+            for s in sheets_list:
+                if target_sheet_title in s.get("title", ""):
+                    sheet_id = s.get("sheet_id")
+                    break
+    except Exception as e:
+        logging.warning(f"シートタブ一覧の取得失敗: {e}")
+
+    # 当月タブが存在しない場合、Formatシート（Yb6Zwo）を複製して自動作成
+    if not sheet_id:
+        logging.info(f"✨ 当月シート [{target_sheet_title}] が存在しないため、Formatシートから複製します...")
+        try:
+            copy_url = f"https://open.larksuite.com/open-apis/sheets/v3/spreadsheets/{spreadsheet_token}/sheets/{DEFAULT_SHEET_ID}/copy"
+            copy_body = {"destination_name": target_sheet_title}
+            res_copy = requests.post(copy_url, headers=headers, json=copy_body, timeout=10)
+            res_copy_json = res_copy.json()
+            
+            if res_copy_json.get("code") == 0:
+                sheet_id = res_copy_json.get("data", {}).get("sheet", {}).get("sheet_id")
+                logging.info(f"✅ Formatシートを複製して [{target_sheet_title}] (ID: {sheet_id}) を作成しました。")
+            else:
+                logging.error(f"シート作成失敗: {res_copy_json}")
+                sheet_id = DEFAULT_SHEET_ID
+        except Exception as e:
+            logging.error(f"シート自動作成エラー: {e}")
+            sheet_id = DEFAULT_SHEET_ID
+
+    # F列（件名）を読み込んで最初の空行（データ開始行: 4行目〜）を特定
+    read_url = f"https://open.larksuite.com/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}/values/{sheet_id}!F1:F200"
+    target_row = 4
+    try:
+        res_read = requests.get(read_url, headers=headers, timeout=10)
+        if res_read.status_code == 200:
+            values = res_read.json().get("data", {}).get("valueRange", {}).get("values", [])
+            for idx in range(3, len(values)):
+                row_val = values[idx]
+                if not row_val or not str(row_val[0]).strip():
+                    target_row = idx + 1
+                    break
+            else:
+                target_row = len(values) + 1 if len(values) >= 3 else 4
+    except Exception as e:
+        logging.warning(f"空行判定エラー: {e}")
+
+    next_biz_day = get_next_business_day().strftime('%Y/%m/%d')
+    write_url = f"https://open.larksuite.com/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}/values"
+
+    for d in extracted_data:
+        region = get_region_from_address(d['住所'])
+        team = "ガスプラ課" if region == "関東" else "西日本"
+        action = f"【{d['停止or復旧']}】"
+        subject = f"{action}{d['物件名']} {d['部屋番号']}"
+
+        # B列:作業者名(空白), C列:チーム, D列:内容, E列:物件区分, F列:件名, G列:作業日, H列:納入数量(1), I列:金額(35000), J列:消費税(3500)
+        row_bj = ["", team, action, d['物件種別'], subject, next_biz_day, 1, 35000, 3500]
+
+        body_bj = {
+            "valueRange": {
+                "range": f"{sheet_id}!B{target_row}:J{target_row}",
+                "values": [row_bj]
+            }
+        }
+        
+        try:
+            res_w = requests.put(write_url, headers=headers, json=body_bj, timeout=10)
+            if d.get('備考'):
+                body_k = {
+                    "valueRange": {
+                        "range": f"{sheet_id}!K{target_row}:K{target_row}",
+                        "values": [[d['備考']]]
+                    }
+                }
+                requests.put(write_url, headers=headers, json=body_k, timeout=10)
+            
+            logging.info(f"📝 Larkシート [{target_sheet_title}] (行{target_row}) に転記完了: {subject}")
+            target_row += 1
+        except Exception as e:
+            logging.error(f"Larkシート書き込み失敗: {e}")
+
+def send_combined_lark_report(success_list, failure_list):
+    if not LARK_WEBHOOK_URL: return
+    if not success_list and not failure_list: return
+
+    now_str = jst_now().strftime('%Y-%m-%d %H:%M:%S')
+    elements = []
+
+    for item in success_list:
+        elements.append({
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": (
+                    f"**ステータス:** ✅ SUCCESS\n"
+                    f"**詳細:** レジル停止作業 「{item['name']}」 BLASおよびLarkシートの登録が完了しました\n"
+                    f"**地域:** {item['region']}\n"
+                    f"**スイッチ:** {item.get('switch', 'あり')}\n"
+                    f"**実行日時:** {now_str}"
+                )
+            }
+        })
+
+    if failure_list:
+        if success_list: elements.append({"tag": "hr"})
+        for name, reason in failure_list:
+            elements.append({
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": (
+                        f"**ステータス:** ❌ FAILURE\n"
+                        f"**詳細:** {name} の登録に失敗しました\n"
+                        f"**理由:** {reason}\n"
+                        f"**実行日時:** {now_str}"
+                    )
+                }
+            })
+
+    header_template = "red" if failure_list else "orange"
+
     payload = {
         "msg_type": "interactive",
         "card": {
             "header": {
-                "title": {"tag": "plain_text", "content": "🤖 Web自動化処理 SUCCESS"},
-                "template": "orange"
+                "title": {"tag": "plain_text", "content": "🤖 Web自動化処理 SUCCESS" if not failure_list else "⚠️ Web自動化処理 REPORT"},
+                "template": header_template
             },
-            "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": details}}]
+            "elements": elements
         }
     }
+    
     try:
-        requests.post(LARK_WEBHOOK_URL, json=payload)
+        response = requests.post(LARK_WEBHOOK_URL, json=payload, timeout=10)
+        response.raise_for_status()
     except Exception as e:
-        logging.error(f"Lark通知失敗: {e}")
+        logging.error(f"Lark通知送信エラー: {e}")
 
 def get_next_business_day():
     next_day = datetime.date.today() + datetime.timedelta(days=1)
@@ -209,7 +389,7 @@ def fetch_hennge_details(service, processed_label_id):
     logging.info("Gmail APIに接続し、対象メールを検証中...")
     
     try:
-        search_query = '電気停止訪問リスト -label:処理済み'
+        search_query = '(電気停止リスト OR 電力停止リスト OR 電気停止訪問リスト OR 停止リスト) -label:処理済み'
         results_url = service.users().messages().list(userId='me', q=search_query, maxResults=50).execute()
         messages_url = results_url.get('messages', [])
         
@@ -455,7 +635,11 @@ def process_pdf_data(pdf_path):
 
                     if 'レジル' in row_str: current_type = 'レジル'
                     elif any(k in row_str for k in ['旧オリックス', '旧Eハウス', 'NP']): current_type = 'NP'
-                    if '復旧' in row_str: current_action = '復旧'
+                    
+                    if any(k in row_str for k in ['復旧', '復電']):
+                        current_action = '復旧'
+                    elif any(k in row_str for k in ['停止', '切断']):
+                        current_action = '停止'
 
                     if '物件名' in row_str and ('部屋番号' in row_str or 'ＭＩＤ' in row_str or 'MID' in row_str):
                         for i, val in enumerate(row_clean):
@@ -486,14 +670,17 @@ def process_pdf_data(pdf_path):
 
                     if '文書投函' in kanri_val or '文書投函' in remark_val:
                         action_status = '文書投函'
-                        stop_count += 1
                     elif '復旧' in remark_val or '復旧' in kanri_val:
                         action_status = '復旧'
-                        recovery_count += 1
                     else:
                         action_status = current_action
-                        stop_count += 1
 
+                    # 復旧データはスキップ
+                    if action_status == '復旧':
+                        recovery_count += 1
+                        continue
+
+                    stop_count += 1
                     al_status = '' if al_raw == '' else ('有' if any(k in al_raw for k in ['放', '有', 'あり']) else '無')
 
                     extracted_data.append({
@@ -508,7 +695,9 @@ def process_pdf_data(pdf_path):
                         '備考': remark_val
                     })
 
-    if not extracted_data: raise ValueError("有効データが見つかりませんでした。")
+    if not extracted_data:
+        return "対象データなし", 0, stop_count, recovery_count, "", None, []
+        
     return create_output_csv(extracted_data, stop_count, recovery_count)
 
 def process_excel_data(excel_path):
@@ -539,7 +728,7 @@ def process_excel_data(excel_path):
         row = full_sheet.iloc[i]
         row_str = "".join([str(v) for v in row.values])
         
-        if '＜復旧＞' in row_str or '復旧' in row_str:
+        if any(k in row_str for k in ['＜復旧＞', '復旧', '復電']):
             current_action = '復旧'
         else:
             for kw, t in suspension_keywords.items():
@@ -578,9 +767,20 @@ def process_excel_data(excel_path):
         remark_val = str(row[remark_col]).strip() if remark_col != -1 else ''
         remark_val = '' if remark_val.lower() == 'nan' else remark_val
         
+        # 判定：復旧データは除外する
         action_status = '文書投函' if '文書投函' in remark_val else current_action
         kanri_col = get_c('管理員') if get_c('管理員') != -1 else get_c('管理')
         kanri_val = str(row[kanri_col]).strip() if kanri_col != -1 else ''
+        
+        if '復旧' in remark_val or '復旧' in kanri_val:
+            action_status = '復旧'
+            
+        # 復旧データはスキップ
+        if action_status == '復旧':
+            recovery_count += 1
+            continue
+            
+        stop_count += 1
 
         extracted_data.append({
             '停止or復旧': action_status,
@@ -593,10 +793,10 @@ def process_excel_data(excel_path):
             'AL': al_status,
             '備考': remark_val.replace('\n', ' ')
         })
-        if action_status == '停止': stop_count += 1
-        else: recovery_count += 1
 
-    if not extracted_data: raise ValueError("有効データが見つかりませんでした。")
+    if not extracted_data:
+        return "対象データなし", 0, stop_count, recovery_count, "", None, []
+        
     return create_output_csv(extracted_data, stop_count, recovery_count)
 
 def create_output_csv(extracted_data, stop_count, recovery_count):
@@ -650,11 +850,10 @@ def create_output_csv(extracted_data, stop_count, recovery_count):
     df_final.to_csv(unique_csv_path, index=False, encoding='utf-8-sig')
     
     first_address = extracted_data[0]['住所'] if extracted_data else ""
-    return extracted_data[0]['物件名'], len(df_final), stop_count, recovery_count, first_address, unique_csv_path
+    return extracted_data[0]['物件名'], len(df_final), stop_count, recovery_count, first_address, unique_csv_path, extracted_data
 
 def run_automation(prop_name, count, stop_count, recovery_count, first_address, csv_path):
     options = get_chrome_options()
-    region_name = get_region_from_address(first_address)
     driver = None
     try:
         service = ChromeService(ChromeDriverManager().install())
@@ -689,17 +888,6 @@ def run_automation(prop_name, count, stop_count, recovery_count, first_address, 
         time.sleep(10)
         shutil.move(str(csv_path), PROCESSED_DIR / f"output_{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}.csv")
 
-        now_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        msg_detail = (
-            f"ステータス: ✅ SUCCESS\n"
-            f"詳細: レジル停止・復旧業務のBLAS登録が完了しました。\n"
-            f"地域: {region_name}\n"
-            f"代表物件: {prop_name} 外\n"
-            f"登録件数: {count}件 内訳：停止{stop_count}件 復旧{recovery_count}件\n"
-            f"実行日時: {now_str}"
-        )
-        send_lark_success_card(msg_detail)
-
     except Exception as e:
         logging.error(f"実行エラー: {e}")
         raise
@@ -732,26 +920,50 @@ if __name__ == '__main__':
         logging.error("❌ PDF/Excelファイルが見つかりません。")
         exit(1)
 
-    all_success = True
+    success_items = []
+    failure_items = []
+
     for file_path in target_files:
+        file_name = os.path.basename(file_path)
         try:
             if file_path.lower().endswith('.pdf'):
-                p_name, p_count, s_count, r_count, p_addr, unique_csv_path = process_pdf_data(file_path)
+                p_name, p_count, s_count, r_count, p_addr, unique_csv_path, ext_data = process_pdf_data(file_path)
             else:
-                p_name, p_count, s_count, r_count, p_addr, unique_csv_path = process_excel_data(file_path)
+                p_name, p_count, s_count, r_count, p_addr, unique_csv_path, ext_data = process_excel_data(file_path)
+
+            # ファイル内に「復旧」しかなく抽出データが0件だった場合はスキップ
+            if p_count == 0:
+                logging.info(f"⏭️ {file_name} には「停止」対象データがありませんでした（復旧データ {r_count}件 をスキップ）。")
+                os.remove(file_path)
+                continue
 
             if TEST_CSV_ONLY:
                 continue
 
+            # 1. BLASへの自動登録
             run_automation(p_name, p_count, s_count, r_count, p_addr, unique_csv_path)
+            
+            # 2. Larkスプレッドシートへの自動転記（Formatシートから自動複製）
+            write_to_lark_sheet(ext_data)
+
             os.remove(file_path)
             
+            region_name = get_region_from_address(p_addr)
+            success_items.append({
+                "name": f"{p_name} 外 ({p_count}件)",
+                "region": region_name,
+                "switch": "あり"
+            })
+            
         except Exception as e:
-            logging.error(f"❌ エラーが発生しました ({os.path.basename(file_path)}): {e}")
-            all_success = False
+            logging.error(f"❌ エラーが発生しました ({file_name}): {e}")
+            failure_items.append((file_name, str(e)))
 
-    # BLAS登録含むすべての処理が正常完了した場合のみ「処理済み」ラベルを付与
-    if all_success:
+    # 3. Larkカード通知の送信
+    send_combined_lark_report(success_items, failure_items)
+
+    # 全処理成功時のみ「処理済み」ラベルを付与
+    if not failure_items and success_items:
         add_processed_label(gmail_service, [url_msg_id, pass_msg_id, auth_msg_id], processed_label_id)
 
     logging.info("=== 全処理終了 ===")
