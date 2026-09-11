@@ -40,5 +40,6 @@ jobs:
         env:
           BASIS_USERNAME: ${{ secrets.BASIS_USERNAME }}
           BASIS_PASSWORD: ${{ secrets.BASIS_PASSWORD }}
+          LARK_APP_SECRET: ${{ secrets.LARK_APP_SECRET }}
         run: |
           python main.py
