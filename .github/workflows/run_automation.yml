@@ -1,45 +1,44 @@
-
 name: 30分毎のWeb自動化処理
 
 on:
   schedule:
-    # 30分ごとに実行 (UTC時間)
-    - cron: '*/30 * * * *'
-  workflow_dispatch: # 手動実行用ボタン
+    # 毎時14分と44分に実行（30分間隔のまま混雑ピークだけを回避）
+    - cron: '14,44 * * * *'
+  workflow_dispatch:
 
 jobs:
   run-script:
     runs-on: ubuntu-latest
 
     steps:
-    - name: リポジトリのチェックアウト
-      uses: actions/checkout@v4
+      - name: リポジトリのチェックアウト
+        uses: actions/checkout@v4
 
-    - name: Python環境のセットアップ
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.10'
+      - name: Python環境のセットアップ
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
 
-    - name: Chromeブラウザのインストール
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y wget curl unzip
-        wget https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-        sudo dpkg -i google-chrome-stable_current_amd64.deb || sudo apt-get install -f -y
+      - name: Chromeブラウザのインストール
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget curl unzip
+          wget https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+          sudo dpkg -i google-chrome-stable_current_amd64.deb || sudo apt-get install -f -y
 
-    - name: 依存ライブラリのインストール
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
+      - name: 依存ライブラリのインストール
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-    - name: Gmail認証ファイルの生成
-      run: |
-        echo '${{ secrets.GMAIL_CREDENTIALS_JSON }}' > credentials.json
-        echo '${{ secrets.GMAIL_TOKEN_JSON }}' > token.json
+      - name: Gmail認証ファイルの生成
+        run: |
+          echo '${{ secrets.GMAIL_CREDENTIALS_JSON }}' > credentials.json
+          echo '${{ secrets.GMAIL_TOKEN_JSON }}' > token.json
 
-    - name: 自動化スクリプト実行
-      env:
-        BASIS_USERNAME: ${{ secrets.BASIS_USERNAME }}
-        BASIS_PASSWORD: ${{ secrets.BASIS_PASSWORD }}
-      run: |
-        python main.py
+      - name: 自動化スクリプト実行
+        env:
+          BASIS_USERNAME: ${{ secrets.BASIS_USERNAME }}
+          BASIS_PASSWORD: ${{ secrets.BASIS_PASSWORD }}
+        run: |
+          python main.py
