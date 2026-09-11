@@ -60,13 +60,13 @@ KANTO_PREFS = ['東京都', '神奈川県', '埼玉県', '千葉県', '茨城県
 KANSAI_PREFS = ['大阪府', '京都府', '兵庫県', '奈良県', '滋賀県', '和歌山県']
 
 TEST_DOWNLOAD_ONLY = False
-TEST_CSV_ONLY = False 
+TEST_CSV_ONLY = False
 
 LOG_DIR = BASE_DIR / "log"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 log_filename = f"selenium_log_{datetime.datetime.now().strftime('%Y%m%d')}.log"
 logging.basicConfig(
-    level=logging.INFO, 
+    level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[logging.FileHandler(LOG_DIR / log_filename, encoding='utf-8'), logging.StreamHandler()]
 )
@@ -389,7 +389,8 @@ def fetch_hennge_details(service, processed_label_id):
     logging.info("Gmail APIに接続し、対象メールを検証中...")
     
     try:
-        search_query = '(電気停止リスト OR 電力停止リスト OR 電気停止訪問リスト OR 停止リスト) -label:処理済み'
+        # 「電力停止」ラベルが付いていて「停止」キーワードを含み、「処理済み」でないメールを検索
+        search_query = 'label:電力停止 停止 -label:処理済み'
         results_url = service.users().messages().list(userId='me', q=search_query, maxResults=50).execute()
         messages_url = results_url.get('messages', [])
         
@@ -402,6 +403,11 @@ def fetch_hennge_details(service, processed_label_id):
             headers = {h['name'].lower(): h['value'] for h in payload.get('headers', [])}
             subj = headers.get('subject', '（件名なし）')
             
+            # 安全ガード: 件名に「停止」が含まれない問い合わせや復旧メール等は除外
+            if '停止' not in subj:
+                logging.info(f"  ⏭️ 件名に『停止』が含まれないためスキップ: {subj}")
+                continue
+
             body = get_email_body(payload)
             clean_body = re.sub(r'<[^>]+>', ' ', body)
             clean_body = clean_body.replace('\r\n', ' ').replace('\n', ' ').replace('\r', ' ')
