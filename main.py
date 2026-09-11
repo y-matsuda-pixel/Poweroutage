@@ -204,28 +204,29 @@ def fetch_hennge_details(service, processed_label_id):
     logging.info("Gmail APIに接続し、対象メールを検証中...")
     
     try:
-        results_url = service.users().messages().list(userId='me', q='電気停止訪問リスト', maxResults=500).execute()
+        # ★改善点: API検索クエリで最初から「処理済み」ラベルが付いていないメールに絞り込み
+        search_query = '電気停止訪問リスト -label:処理済み'
+        results_url = service.users().messages().list(userId='me', q=search_query, maxResults=50).execute()
         messages_url = results_url.get('messages', [])
         
-        logging.info(f"--- 検索該当メール件数: {len(messages_url)}件 ---")
+        logging.info(f"--- 検索該当（未処理）メール件数: {len(messages_url)}件 ---")
         
         for idx, m in enumerate(messages_url, 1):
             time.sleep(0.1)
             msg = service.users().messages().get(userId='me', id=m['id']).execute()
-            label_ids = msg.get('labelIds', [])
             payload = msg['payload']
             headers = {h['name'].lower(): h['value'] for h in payload.get('headers', [])}
             subj = headers.get('subject', '（件名なし）')
             
-            is_processed = processed_label_id in label_ids if processed_label_id else False
             body = get_email_body(payload)
             
             clean_body = re.sub(r'<[^>]+>', ' ', body)
             clean_body = clean_body.replace('\r\n', ' ').replace('\n', ' ').replace('\r', ' ')
             
-            url_match = re.search(r'(https://[a-zA-Z0-9.-]*transfer\.hennge\.com/[a-zA-Z0-9_-]+)', clean_body)
+            # ★改善点: HENNGEのパラメータ付きURLにも対応する記号許容型の正規表現パターン
+            url_match = re.search(r'(https://[a-zA-Z0-9.-]*transfer\.hennge\.com/[^\s"\'<>]+)', clean_body)
 
-            if not is_processed and url_match and not url:
+            if url_match and not url:
                 url = url_match.group(1)
                 url_msg_id = m['id']
                 url_thread_id = msg.get('threadId', '')
@@ -236,7 +237,7 @@ def fetch_hennge_details(service, processed_label_id):
                 if "関西" in subject_text: target_region = "関西"
                 elif "関東" in subject_text: target_region = "関東"
                 
-                logging.info(f"  👉 処理対象として決定: {url}")
+                logging.info(f"  👉 処理対象として決定: {url} (件名: {subj})")
                 break
 
         if not url: return None, [], "", None
@@ -245,8 +246,8 @@ def fetch_hennge_details(service, processed_label_id):
         after_date = url_dt.strftime('%Y/%m/%d')
         before_date = (url_dt + datetime.timedelta(days=1)).strftime('%Y/%m/%d')
         
-        search_query = f'(パスワード OR Password) after:{after_date} before:{before_date}'
-        results_pass = service.users().messages().list(userId='me', q=search_query, maxResults=50).execute()
+        search_query_pass = f'(パスワード OR Password) after:{after_date} before:{before_date}'
+        results_pass = service.users().messages().list(userId='me', q=search_query_pass, maxResults=50).execute()
         messages_pass = results_pass.get('messages', [])
         
         candidates = []
