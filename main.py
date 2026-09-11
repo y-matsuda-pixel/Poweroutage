@@ -1,6 +1,5 @@
 # coding: utf-8
 
-import jpholiday
 import pandas as pd
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service as ChromeService
@@ -116,9 +115,13 @@ def send_lark_success_card(details):
 
 def get_next_business_day():
     next_day = datetime.date.today() + datetime.timedelta(days=1)
-    # 土日（>=5）または日本の祝日の場合は翌日に進める
-    while next_day.weekday() >= 5 or jpholiday.is_holiday(next_day):
-        next_day += datetime.timedelta(days=1)
+    try:
+        import jpholiday
+        while next_day.weekday() >= 5 or jpholiday.is_holiday(next_day):
+            next_day += datetime.timedelta(days=1)
+    except ImportError:
+        while next_day.weekday() >= 5:
+            next_day += datetime.timedelta(days=1)
     return next_day
 
 def get_gmail_service():
@@ -206,7 +209,6 @@ def fetch_hennge_details(service, processed_label_id):
     logging.info("Gmail APIに接続し、対象メールを検証中...")
     
     try:
-        # ★改善点: API検索クエリで最初から「処理済み」ラベルが付いていないメールに絞り込み
         search_query = '電気停止訪問リスト -label:処理済み'
         results_url = service.users().messages().list(userId='me', q=search_query, maxResults=50).execute()
         messages_url = results_url.get('messages', [])
@@ -221,11 +223,9 @@ def fetch_hennge_details(service, processed_label_id):
             subj = headers.get('subject', '（件名なし）')
             
             body = get_email_body(payload)
-            
             clean_body = re.sub(r'<[^>]+>', ' ', body)
             clean_body = clean_body.replace('\r\n', ' ').replace('\n', ' ').replace('\r', ' ')
             
-            # ★改善点: HENNGEのパラメータ付きURLにも対応する記号許容型の正規表現パターン
             url_match = re.search(r'(https://[a-zA-Z0-9.-]*transfer\.hennge\.com/[^\s"\'<>]+)', clean_body)
 
             if url_match and not url:
@@ -722,8 +722,6 @@ if __name__ == '__main__':
         logging.error("ダウンロード失敗。終了します。")
         exit(1)
 
-    add_processed_label(gmail_service, [url_msg_id, pass_msg_id, auth_msg_id], processed_label_id)
-
     if downloaded_file_path.lower().endswith('.zip'):
         with zipfile.ZipFile(downloaded_file_path, 'r') as zip_ref:
             zip_ref.extractall(DOWNLOAD_DIR)
@@ -734,6 +732,7 @@ if __name__ == '__main__':
         logging.error("❌ PDF/Excelファイルが見つかりません。")
         exit(1)
 
+    all_success = True
     for file_path in target_files:
         try:
             if file_path.lower().endswith('.pdf'):
@@ -749,5 +748,10 @@ if __name__ == '__main__':
             
         except Exception as e:
             logging.error(f"❌ エラーが発生しました ({os.path.basename(file_path)}): {e}")
+            all_success = False
+
+    # BLAS登録含むすべての処理が正常完了した場合のみ「処理済み」ラベルを付与
+    if all_success:
+        add_processed_label(gmail_service, [url_msg_id, pass_msg_id, auth_msg_id], processed_label_id)
 
     logging.info("=== 全処理終了 ===")
