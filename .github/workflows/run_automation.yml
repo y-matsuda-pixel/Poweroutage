@@ -1,4 +1,4 @@
-name: 30分毎のWeb自動化処理
+name: 15分毎のWeb自動化処理
 
 on:
   workflow_dispatch:
