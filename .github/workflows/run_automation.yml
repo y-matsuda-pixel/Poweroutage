@@ -42,6 +42,10 @@ jobs:
         env:
           BASIS_USERNAME: ${{ secrets.BASIS_USERNAME }}
           BASIS_PASSWORD: ${{ secrets.BASIS_PASSWORD }}
+          LARK_APP_ID: ${{ secrets.LARK_APP_ID }}
           LARK_APP_SECRET: ${{ secrets.LARK_APP_SECRET }}
+          LARK_WEBHOOK_URL: ${{ secrets.LARK_WEBHOOK_URL }}
+          LARK_WIKI_TOKEN: ${{ secrets.LARK_WIKI_TOKEN }}
+          DEFAULT_SHEET_ID: ${{ secrets.DEFAULT_SHEET_ID }}
         run: |
           python main.py
