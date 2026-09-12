@@ -1,9 +1,6 @@
 name: 30分毎のWeb自動化処理
 
 on:
-  schedule:
-    # 毎時14分と44分に実行（30分間隔のまま混雑ピークだけを回避）
-    - cron: '14,44 * * * *'
   workflow_dispatch:
 
 jobs:
