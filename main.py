@@ -378,7 +378,9 @@ def fetch_hennge_details(service, processed_label_id):
             url_match = re.search(r'(https://[a-zA-Z0-9.-]*transfer\.hennge\.com/[^\s"\'<>]+)', clean_body)
 
             if url_match and not url:
-                url = url_match.group(1)
+                # 末尾の不要な記号・句読点・ピリオド・空白を除去
+                raw_url = url_match.group(1)
+                url = raw_url.rstrip('。、.）」】\t\r\n ').rstrip('.')
                 url_msg_id = m['id']
                 url_thread_id = msg.get('threadId', '')
                 url_from = headers.get('from', '')
@@ -483,9 +485,20 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
         driver = webdriver.Chrome(service=service_chrome, options=options)
         wait = WebDriverWait(driver, 20)
         driver.get(url)
-        time.sleep(2)
+        time.sleep(3)
 
-        pass_input = wait.until(EC.presence_of_element_located((By.XPATH, "//input[@type='password']")))
+        # ページ読み込み後のチェック
+        page_source = driver.page_source
+        if "存在しません" in page_source or "見つかりません" in page_source or "Expired" in page_source:
+            logging.error(f"❌ HENNGE画面で『リンク先が存在しません / 有効期限切れ』のエラーが検知されました。 (URL: {url})")
+            return None, None, None
+
+        try:
+            pass_input = wait.until(EC.presence_of_element_located((By.XPATH, "//input[@type='password']")))
+        except Exception as e:
+            logging.error(f"❌ パスワード入力欄が見つかりません。現在のページタイトル: {driver.title}")
+            return None, None, None
+
         successful_password, successful_pass_msg_id = None, None
         
         for score, cand_password, p_subj, p_date, p_msg_id, t_diff in password_candidates:
@@ -508,7 +521,9 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
                 break
             except Exception: pass
 
-        if not successful_password: return None, None, None
+        if not successful_password:
+            logging.error("❌ 一致するダウンロードパスワードが見つかりませんでした。")
+            return None, None, None
 
         email_input.clear()
         email_input.send_keys(my_email)
