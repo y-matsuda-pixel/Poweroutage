@@ -56,6 +56,9 @@ DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 KANTO_PREFS = ['東京都', '神奈川県', '埼玉県', '千葉県', '茨城県', '栃木県', '群馬県']
 KANSAI_PREFS = ['大阪府', '京都府', '兵庫県', '奈良県', '滋賀県', '和歌山県']
 
+KANSAI_CITIES = ['大阪市', '京都市', '神戸市', '堺市', '奈良市', '和歌山市', '大津市', '東大阪市', '西宮市', '尼崎市', '豊中市', '吹田市', '枚方市', '高槻市', '茨木市', '八尾市', '寝屋川市', '姫路市', '明石市', '加古川市', '宝塚市', '伊丹市', '川西市', '精華', '木津川', '宇治市', '城陽市', '生駒市']
+KANTO_CITIES = ['横浜市', '川崎市', 'さいたま市', '千葉市', '相模原市', '船橋市', '川口市', '新宿区', '世田谷区', '港区', '渋谷区', '中央区', '千代田区', '品川区', '目黒区', '大田区', '杉並区', '練馬区', '八王子市', '町田市', '藤沢市', '横須賀市', '平塚市', '茅ヶ崎市', '大和市', '厚木市', '所沢市', '川越市', '越谷市', '草加市', '市川市', '松戸市', '柏市', '市原市', '宇都宮市', '前橋市', '高崎市', '水戸市']
+
 TEST_DOWNLOAD_ONLY = False
 TEST_CSV_ONLY = False
 
@@ -88,7 +91,16 @@ def get_chrome_options():
     options.add_experimental_option("prefs", prefs)
     return options
 
-def get_region_from_address(address):
+# ★地域判定ロジックの改善（ファイル名を最優先でチェック）
+def get_region_from_info(filename, address):
+    # 優先度1: ファイル名に地域情報が入っているか
+    filename_lower = filename.lower() if filename else ""
+    if "関西" in filename_lower or "西日本" in filename_lower:
+        return "関西"
+    elif "関東" in filename_lower or "東日本" in filename_lower:
+        return "関東"
+
+    # 優先度2: ファイル名に無ければ、従来通り住所から推測
     if not address: return "不明"
     match = re.search(r'([一-龠]{2,3}[都道府県])', address)
     if match:
@@ -96,11 +108,8 @@ def get_region_from_address(address):
         if prefecture in KANTO_PREFS: return "関東"
         elif prefecture in KANSAI_PREFS: return "関西"
 
-    kansai_cities = ['大阪市', '京都市', '神戸市', '堺市', '奈良市', '和歌山市', '大津市', '東大阪市', '西宮市', '尼崎市', '豊中市', '吹田市']
-    if any(city in address for city in kansai_cities): return "関西"
-    
-    kanto_cities = ['横浜市', '川崎市', 'さいたま市', '千葉市', '相模原市', '船橋市', '川口市', '新宿区', '世田谷区']
-    if any(city in address for city in kanto_cities): return "関東"
+    if any(city in address for city in KANSAI_CITIES): return "関西"
+    if any(city in address for city in KANTO_CITIES): return "関東"
 
     if match: return f"その他（{match.group(1).strip()}）"
     return "不明"
@@ -120,18 +129,9 @@ def get_lark_tenant_access_token():
     return None
 
 def get_spreadsheet_token(tenant_token):
-    url = f"https://open.larksuite.com/open-apis/wiki/v2/spaces/get_node?token={LARK_WIKI_TOKEN}"
-    headers = {"Authorization": f"Bearer {tenant_token}"}
-    try:
-        res = requests.get(url, headers=headers, timeout=10)
-        res_json = res.json()
-        if res_json.get("code") == 0:
-            return res_json.get("data", {}).get("node", {}).get("obj_token", LARK_WIKI_TOKEN)
-    except Exception as e:
-        logging.warning(f"Wikiノード取得エラー: {e}")
     return LARK_WIKI_TOKEN
 
-def write_to_lark_sheet(extracted_data):
+def write_to_lark_sheet(extracted_data, detected_region):
     tenant_token = get_lark_tenant_access_token()
     if not tenant_token:
         logging.warning("Lark APIトークンが取得できなかったため、シート書き込みをスキップします。")
@@ -150,12 +150,15 @@ def write_to_lark_sheet(extracted_data):
     try:
         sheets_url = f"https://open.larksuite.com/open-apis/sheets/v3/spreadsheets/{spreadsheet_token}/sheets/query"
         res_sheets = requests.get(sheets_url, headers=headers, timeout=10)
-        if res_sheets.status_code == 200:
-            sheets_list = res_sheets.json().get("data", {}).get("sheets", [])
+        res_data = res_sheets.json()
+        if res_sheets.status_code == 200 and res_data.get("code") == 0:
+            sheets_list = res_data.get("data", {}).get("sheets", [])
             for s in sheets_list:
                 if target_sheet_title in s.get("title", ""):
                     sheet_id = s.get("sheet_id")
                     break
+        else:
+            logging.error(f"Larkシート一覧取得失敗 (Code: {res_data.get('code')}): {res_data.get('msg')}")
     except Exception as e:
         logging.warning(f"シートタブ一覧の取得失敗: {e}")
 
@@ -171,17 +174,19 @@ def write_to_lark_sheet(extracted_data):
                 sheet_id = res_copy_json.get("data", {}).get("sheet", {}).get("sheet_id")
                 logging.info(f"✅ Formatシートを複製して [{target_sheet_title}] (ID: {sheet_id}) を作成しました。")
             else:
+                logging.error(f"Larkシート複製失敗 (Code: {res_copy_json.get('code')}): {res_copy_json.get('msg')}")
                 sheet_id = DEFAULT_SHEET_ID
         except Exception as e:
             logging.error(f"シート自動作成エラー: {e}")
             sheet_id = DEFAULT_SHEET_ID
 
-    read_url = f"https://open.larksuite.com/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}/values/{sheet_id}!F1:F200"
+    read_url = f"https://open.larksuite.com/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}/values/{sheet_id}!B1:B200"
     target_row = 4
     try:
         res_read = requests.get(read_url, headers=headers, timeout=10)
-        if res_read.status_code == 200:
-            values = res_read.json().get("data", {}).get("valueRange", {}).get("values", [])
+        res_read_data = res_read.json()
+        if res_read.status_code == 200 and res_read_data.get("code") == 0:
+            values = res_read_data.get("data", {}).get("valueRange", {}).get("values", [])
             for idx in range(3, len(values)):
                 row_val = values[idx]
                 if not row_val or not str(row_val[0]).strip():
@@ -189,6 +194,8 @@ def write_to_lark_sheet(extracted_data):
                     break
             else:
                 target_row = len(values) + 1 if len(values) >= 3 else 4
+        else:
+            logging.error(f"Larkシート空行検索失敗 (Code: {res_read_data.get('code')}): {res_read_data.get('msg')}")
     except Exception as e:
         logging.warning(f"空行判定エラー: {e}")
 
@@ -196,8 +203,8 @@ def write_to_lark_sheet(extracted_data):
     write_url = f"https://open.larksuite.com/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}/values"
 
     for d in extracted_data:
-        region = get_region_from_address(d['住所'])
-        team = "ガスプラ課" if region == "関東" else "西日本"
+        # ★ファイル名から判定した地域情報（detected_region）をそのままチームに適用
+        team = "ガスプラ課" if detected_region == "関東" else "西日本"
         action = f"【{d['停止or復旧']}】"
         subject = f"{action}{d['物件名']} {d['部屋番号']}"
 
@@ -211,7 +218,11 @@ def write_to_lark_sheet(extracted_data):
         }
         
         try:
-            requests.put(write_url, headers=headers, json=body_bj, timeout=10)
+            res_put = requests.put(write_url, headers=headers, json=body_bj, timeout=10)
+            res_put_data = res_put.json()
+            if res_put_data.get("code") != 0:
+                 logging.error(f"Larkシート書込エラー (B-J列) 行{target_row}: {res_put_data.get('msg')}")
+
             if d.get('備考'):
                 body_k = {
                     "valueRange": {
@@ -219,12 +230,14 @@ def write_to_lark_sheet(extracted_data):
                         "values": [[d['備考']]]
                     }
                 }
-                requests.put(write_url, headers=headers, json=body_k, timeout=10)
+                res_k = requests.put(write_url, headers=headers, json=body_k, timeout=10)
+                if res_k.json().get("code") != 0:
+                     logging.error(f"Larkシート書込エラー (K列) 行{target_row}: {res_k.json().get('msg')}")
             
             logging.info(f"📝 Larkシート [{target_sheet_title}] (行{target_row}) に転記完了: {subject}")
             target_row += 1
         except Exception as e:
-            logging.error(f"Larkシート書き込み失敗: {e}")
+            logging.error(f"Larkシート書き込み例外: {e}")
 
 def send_combined_lark_report(success_list, failure_list):
     if not LARK_WEBHOOK_URL: return
@@ -234,6 +247,7 @@ def send_combined_lark_report(success_list, failure_list):
     elements = []
 
     for item in success_list:
+        # 不要な「スイッチ」項目を削除
         elements.append({
             "tag": "div",
             "text": {
@@ -242,7 +256,6 @@ def send_combined_lark_report(success_list, failure_list):
                     f"**ステータス:** ✅ SUCCESS\n"
                     f"**詳細:** レジル停止作業 「{item['name']}」 BLASおよびLarkシートの登録が完了しました\n"
                     f"**地域:** {item['region']}\n"
-                    f"**スイッチ:** {item.get('switch', 'あり')}\n"
                     f"**実行日時:** {now_str}"
                 )
             }
@@ -264,7 +277,7 @@ def send_combined_lark_report(success_list, failure_list):
                 }
             })
 
-    header_template = "red" if failure_list else "orange"
+    header_template = "green" if not failure_list else "red"
 
     payload = {
         "msg_type": "interactive",
@@ -430,7 +443,7 @@ def fetch_hennge_details(service, processed_label_id):
                 for match_item in re.finditer(pat, clean_body_pass, re.IGNORECASE):
                     c_val = match_item.group(1).strip().strip('。、.）」】 \t\r\n')
                     if not c_val.isascii(): continue
-                    # ★パスワードは必ず「12桁」である条件
+                    # パスワードは必ず「12桁」である条件
                     if len(c_val) != 12: continue
                     if any(w in c_val.lower() for w in ["password", "japanese", "english", "hennge", "transfer", "http", "https", "mailto", "url", "download"]): continue
                     found_cands.append(c_val)
@@ -459,7 +472,7 @@ def fetch_hennge_details(service, processed_label_id):
     return url, unique_candidates, subject_text, url_msg_id
 
 def fetch_verification_code(service, start_timestamp, processed_label_id):
-    # ★「belowを拾う問題」の完全解決: 必ず6桁の数字だけを抽出する
+    # ★完全に独立した「6桁の連続した数字」だけを抜き出す正規表現
     for _ in range(15):
         time.sleep(3)
         try:
@@ -472,7 +485,6 @@ def fetch_verification_code(service, start_timestamp, processed_label_id):
                     body = get_email_body(msg['payload'])
                     clean_body = re.sub(r'<[^>]+>', ' ', body).replace('\r\n', ' ').replace('\n', ' ').replace('\r', ' ')
                     
-                    # 完全に独立した「6桁の連続した数字」だけを抜き出す正規表現
                     code_match = re.search(r'\b(\d{6})\b', clean_body)
                     if code_match:
                         return code_match.group(1).strip(), m['id']
@@ -480,7 +492,6 @@ def fetch_verification_code(service, start_timestamp, processed_label_id):
     return None, None
 
 def download_from_hennge(url, password_candidates, service, processed_label_id):
-    # ★ログ表示の (URL: xxx) をやめ、綺麗に URL: https://... と出力されるように修正
     logging.info(f"HENNGEからファイルのダウンロードを開始します URL: {url}")
     my_email = service.users().getProfile(userId='me').execute().get('emailAddress', '')
     
@@ -891,15 +902,16 @@ if __name__ == '__main__':
             time.sleep(10)
             
             shutil.move(str(unique_csv_path), PROCESSED_DIR / f"output_{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}.csv")
-            write_to_lark_sheet(ext_data)
+            
+            # ★ファイル名から地域情報を取得し、Larkシート書き込みに渡す
+            detected_region = get_region_from_info(file_name, p_addr)
+            write_to_lark_sheet(ext_data, detected_region)
 
             os.remove(file_path)
             
-            region_name = get_region_from_address(p_addr)
             success_items.append({
                 "name": f"{p_name} 外 ({p_count}件)",
-                "region": region_name,
-                "switch": "あり"
+                "region": detected_region
             })
             
         except Exception as e:
