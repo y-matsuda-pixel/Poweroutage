@@ -17,11 +17,14 @@ from datetime import timezone, timedelta
 import logging
 import requests
 from pathlib import Path
-import pdfplumber
 import re
 import glob
 import base64
 import zipfile
+
+# PDF解析用ライブラリ
+from pdfminer.high_level import extract_pages
+from pdfminer.layout import LTTextContainer
 
 # Gmail API用ライブラリ
 from google.oauth2.credentials import Credentials
@@ -91,16 +94,13 @@ def get_chrome_options():
     options.add_experimental_option("prefs", prefs)
     return options
 
-# ★地域判定ロジックの改善（ファイル名を最優先でチェック）
 def get_region_from_info(filename, address):
-    # 優先度1: ファイル名に地域情報が入っているか
     filename_lower = filename.lower() if filename else ""
     if "関西" in filename_lower or "西日本" in filename_lower:
         return "関西"
     elif "関東" in filename_lower or "東日本" in filename_lower:
         return "関東"
 
-    # 優先度2: ファイル名に無ければ、従来通り住所から推測
     if not address: return "不明"
     match = re.search(r'([一-龠]{2,3}[都道府県])', address)
     if match:
@@ -157,27 +157,20 @@ def write_to_lark_sheet(extracted_data, detected_region):
                 if target_sheet_title in s.get("title", ""):
                     sheet_id = s.get("sheet_id")
                     break
-        else:
-            logging.error(f"Larkシート一覧取得失敗 (Code: {res_data.get('code')}): {res_data.get('msg')}")
     except Exception as e:
         logging.warning(f"シートタブ一覧の取得失敗: {e}")
 
     if not sheet_id:
-        logging.info(f"✨ 当月シート [{target_sheet_title}] が存在しないため、Formatシートから複製します...")
         try:
             copy_url = f"https://open.larksuite.com/open-apis/sheets/v3/spreadsheets/{spreadsheet_token}/sheets/{DEFAULT_SHEET_ID}/copy"
             copy_body = {"destination_name": target_sheet_title}
             res_copy = requests.post(copy_url, headers=headers, json=copy_body, timeout=10)
             res_copy_json = res_copy.json()
-            
             if res_copy_json.get("code") == 0:
                 sheet_id = res_copy_json.get("data", {}).get("sheet", {}).get("sheet_id")
-                logging.info(f"✅ Formatシートを複製して [{target_sheet_title}] (ID: {sheet_id}) を作成しました。")
             else:
-                logging.error(f"Larkシート複製失敗 (Code: {res_copy_json.get('code')}): {res_copy_json.get('msg')}")
                 sheet_id = DEFAULT_SHEET_ID
         except Exception as e:
-            logging.error(f"シート自動作成エラー: {e}")
             sheet_id = DEFAULT_SHEET_ID
 
     read_url = f"https://open.larksuite.com/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}/values/{sheet_id}!B1:B200"
@@ -194,8 +187,6 @@ def write_to_lark_sheet(extracted_data, detected_region):
                     break
             else:
                 target_row = len(values) + 1 if len(values) >= 3 else 4
-        else:
-            logging.error(f"Larkシート空行検索失敗 (Code: {res_read_data.get('code')}): {res_read_data.get('msg')}")
     except Exception as e:
         logging.warning(f"空行判定エラー: {e}")
 
@@ -203,7 +194,6 @@ def write_to_lark_sheet(extracted_data, detected_region):
     write_url = f"https://open.larksuite.com/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}/values"
 
     for d in extracted_data:
-        # ★ファイル名から判定した地域情報（detected_region）をそのままチームに適用
         team = "ガスプラ課" if detected_region == "関東" else "西日本"
         action = f"【{d['停止or復旧']}】"
         subject = f"{action}{d['物件名']} {d['部屋番号']}"
@@ -218,11 +208,7 @@ def write_to_lark_sheet(extracted_data, detected_region):
         }
         
         try:
-            res_put = requests.put(write_url, headers=headers, json=body_bj, timeout=10)
-            res_put_data = res_put.json()
-            if res_put_data.get("code") != 0:
-                 logging.error(f"Larkシート書込エラー (B-J列) 行{target_row}: {res_put_data.get('msg')}")
-
+            requests.put(write_url, headers=headers, json=body_bj, timeout=10)
             if d.get('備考'):
                 body_k = {
                     "valueRange": {
@@ -230,24 +216,18 @@ def write_to_lark_sheet(extracted_data, detected_region):
                         "values": [[d['備考']]]
                     }
                 }
-                res_k = requests.put(write_url, headers=headers, json=body_k, timeout=10)
-                if res_k.json().get("code") != 0:
-                     logging.error(f"Larkシート書込エラー (K列) 行{target_row}: {res_k.json().get('msg')}")
-            
+                requests.put(write_url, headers=headers, json=body_k, timeout=10)
             logging.info(f"📝 Larkシート [{target_sheet_title}] (行{target_row}) に転記完了: {subject}")
             target_row += 1
         except Exception as e:
             logging.error(f"Larkシート書き込み例外: {e}")
 
 def send_combined_lark_report(success_list, failure_list):
-    if not LARK_WEBHOOK_URL: return
-    if not success_list and not failure_list: return
-
+    if not LARK_WEBHOOK_URL or (not success_list and not failure_list): return
     now_str = jst_now().strftime('%Y-%m-%d %H:%M:%S')
     elements = []
 
     for item in success_list:
-        # 不要な「スイッチ」項目を削除
         elements.append({
             "tag": "div",
             "text": {
@@ -277,22 +257,18 @@ def send_combined_lark_report(success_list, failure_list):
                 }
             })
 
-    header_template = "green" if not failure_list else "red"
-
     payload = {
         "msg_type": "interactive",
         "card": {
             "header": {
                 "title": {"tag": "plain_text", "content": "🤖 Web自動化処理 SUCCESS" if not failure_list else "⚠️ Web自動化処理 REPORT"},
-                "template": header_template
+                "template": "green" if not failure_list else "red"
             },
             "elements": elements
         }
     }
-    
     try:
-        response = requests.post(LARK_WEBHOOK_URL, json=payload, timeout=10)
-        response.raise_for_status()
+        requests.post(LARK_WEBHOOK_URL, json=payload, timeout=10)
     except Exception as e:
         logging.error(f"Lark通知送信エラー: {e}")
 
@@ -310,32 +286,22 @@ def get_next_business_day():
 def get_gmail_service():
     creds = None
     token_path = BASE_DIR / 'token.json'
-
     if os.path.exists(token_path):
         try: creds = Credentials.from_authorized_user_file(token_path, SCOPES)
-        except Exception as e: logging.warning(f"token.json 読み込み失敗: {e}")
-
+        except Exception: pass
     if creds and creds.expired and creds.refresh_token:
         try: creds.refresh(Request())
-        except Exception as e:
-            logging.warning(f"トークン自動更新失敗: {e}")
-            creds = None
-
+        except Exception: creds = None
     if not creds or not creds.valid:
         raise RuntimeError("Gmail認証トークン(token.json)が無効または存在しません。")
-
     return build('gmail', 'v1', credentials=creds, cache_discovery=False)
 
 def get_or_create_processed_label_id(service, label_name="処理済み"):
     try:
         results = service.users().labels().list(userId='me').execute()
-        labels = results.get('labels', [])
-        for label in labels:
+        for label in results.get('labels', []):
             if label['name'] == label_name: return label['id']
-        
-        label_object = {'name': label_name, 'labelListVisibility': 'labelShow', 'messageListVisibility': 'show'}
-        created_label = service.users().labels().create(userId='me', body=label_object).execute()
-        return created_label['id']
+        return service.users().labels().create(userId='me', body={'name': label_name}).execute()['id']
     except Exception: return None
 
 def add_processed_label(service, msg_ids, label_id):
@@ -343,12 +309,8 @@ def add_processed_label(service, msg_ids, label_id):
     valid_ids = [m_id for m_id in msg_ids if m_id]
     if not valid_ids: return
     try:
-        service.users().messages().batchModify(
-            userId='me', body={'ids': valid_ids, 'addLabelIds': [label_id]}
-        ).execute()
-        logging.info(f"🏷️ 処理済みラベルを付与しました (対象: {len(valid_ids)}件)")
-    except Exception as e:
-        logging.warning(f"ラベル付与失敗: {e}")
+        service.users().messages().batchModify(userId='me', body={'ids': valid_ids, 'addLabelIds': [label_id]}).execute()
+    except Exception as e: logging.warning(f"ラベル付与失敗: {e}")
 
 def get_email_body(payload):
     plain_text, html_text = "", ""
@@ -363,7 +325,6 @@ def get_email_body(payload):
                 decoded = base64.urlsafe_b64decode(data).decode('utf-8', errors='ignore')
                 if mime_type == 'text/plain' and not plain_text: plain_text = decoded
                 elif mime_type == 'text/html' and not html_text: html_text = decoded
-
     extract_parts(payload)
     body = plain_text if plain_text else html_text
     return body.replace('=\r\n', ' ').replace('=\n', ' ')
@@ -371,29 +332,20 @@ def get_email_body(payload):
 def fetch_hennge_details(service, processed_label_id):
     url, subject_text = None, ""
     url_msg_id, url_msg_timestamp, url_from, url_thread_id, target_region = None, 0, "", "", None
-    logging.info("Gmail APIに接続し、対象メールを検証中...")
-    
     try:
-        search_query = 'label:電力停止 停止 -label:処理済み'
-        results_url = service.users().messages().list(userId='me', q=search_query, maxResults=50).execute()
-        messages_url = results_url.get('messages', [])
-        
-        for m in messages_url:
-            time.sleep(0.1)
+        results_url = service.users().messages().list(userId='me', q='label:電力停止 停止 -label:処理済み', maxResults=50).execute()
+        for m in results_url.get('messages', []):
             msg = service.users().messages().get(userId='me', id=m['id']).execute()
-            payload = msg['payload']
-            headers = {h['name'].lower(): h['value'] for h in payload.get('headers', [])}
-            subj = headers.get('subject', '（件名なし）')
-            
+            headers = {h['name'].lower(): h['value'] for h in msg['payload'].get('headers', [])}
+            subj = headers.get('subject', '')
             if '停止' not in subj: continue
 
-            body = get_email_body(payload)
-            clean_body = re.sub(r'<[^>]+>', ' ', body).replace('\r\n', ' ').replace('\n', ' ').replace('\r', ' ')
+            body = get_email_body(msg['payload'])
+            clean_body = re.sub(r'<[^>]+>', ' ', body).replace('\r\n', ' ').replace('\n', ' ')
             url_match = re.search(r'(https://[a-zA-Z0-9.-]*transfer\.hennge\.com/[^\s"\'<>]+)', clean_body)
 
             if url_match and not url:
-                raw_url = url_match.group(1)
-                url = raw_url.rstrip('。、.）」】)\] \t\r\n').rstrip('.')
+                url = url_match.group(1).rstrip('。、.）」】)\] \t\r\n').rstrip('.')
                 url_msg_id = m['id']
                 url_thread_id = msg.get('threadId', '')
                 url_from = headers.get('from', '')
@@ -409,52 +361,26 @@ def fetch_hennge_details(service, processed_label_id):
         after_date = url_dt.strftime('%Y/%m/%d')
         before_date = (url_dt + datetime.timedelta(days=1)).strftime('%Y/%m/%d')
         
-        search_query_pass = f'(パスワード OR Password) after:{after_date} before:{before_date}'
-        results_pass = service.users().messages().list(userId='me', q=search_query_pass, maxResults=50).execute()
-        messages_pass = results_pass.get('messages', [])
+        results_pass = service.users().messages().list(userId='me', q=f'(パスワード OR Password) after:{after_date} before:{before_date}', maxResults=50).execute()
         candidates = []
 
-        for m in messages_pass:
-            time.sleep(0.1)
+        for m in results_pass.get('messages', []):
             msg = service.users().messages().get(userId='me', id=m['id']).execute()
-            p_thread_id = msg.get('threadId', '')
-            p_label_ids = msg.get('labelIds', [])
-            is_p_processed = processed_label_id in p_label_ids if processed_label_id else False
-            
             headers = {h['name'].lower(): h['value'] for h in msg['payload'].get('headers', [])}
-            p_subject = headers.get('subject', '')
-            p_date = headers.get('date', '')
-            p_from = headers.get('from', '')
             p_timestamp = int(msg.get('internalDate', 0)) / 1000
-            
             time_diff = abs(p_timestamp - url_msg_timestamp)
             if time_diff > 7200 and m['id'] != url_msg_id: continue
 
-            body_pass = get_email_body(msg['payload'])
-            clean_body_pass = re.sub(r'<[^>]+>', ' ', body_pass).replace('\r\n', ' ').replace('\n', ' ').replace('\r', ' ')
-            
+            clean_body_pass = re.sub(r'<[^>]+>', ' ', get_email_body(msg['payload'])).replace('\r\n', ' ').replace('\n', ' ')
             patterns = [
                 r'(?:ファイルダウンロードパスワード|ファイルパスワード|ダウンロードパスワード|パスワード|Password)[:：\s\n]+([a-zA-Z0-9=!@#$%^&*()_+\-=\[\]{};:\'",.<>/?`]{12,32})',
                 r'(?:ファイルダウンロードパスワード|ファイルパスワード|ダウンロードパスワード|パスワード|Password)[:：\s\n]+([\x21-\x7e]{12,32})'
             ]
-            
-            found_cands = []
             for pat in patterns:
                 for match_item in re.finditer(pat, clean_body_pass, re.IGNORECASE):
                     c_val = match_item.group(1).strip().strip('。、.）」】 \t\r\n')
-                    if not c_val.isascii(): continue
-                    # パスワードは必ず「12桁」である条件
-                    if len(c_val) != 12: continue
-                    if any(w in c_val.lower() for w in ["password", "japanese", "english", "hennge", "transfer", "http", "https", "mailto", "url", "download"]): continue
-                    found_cands.append(c_val)
-
-            for cand in found_cands:
-                score = time_diff
-                if not is_p_processed: score -= 1000
-                if url_from and p_from and (url_from in p_from or p_from in url_from): score -= 500
-                if url_thread_id and p_thread_id == url_thread_id: score -= 100000
-                if target_region and target_region in p_subject: score -= 300
-                candidates.append((score, cand, p_subject, p_date, m['id'], time_diff))
+                    if len(c_val) == 12 and c_val.isascii():
+                        candidates.append((time_diff, c_val, headers.get('subject', ''), headers.get('date', ''), m['id'], time_diff))
 
         candidates.sort(key=lambda x: x[0])
         unique_candidates = []
@@ -464,114 +390,83 @@ def fetch_hennge_details(service, processed_label_id):
                 seen_pw.add(c_item[1])
                 unique_candidates.append(c_item)
 
-        logging.info(f"🔑 パスワード候補を抽出しました ({len(unique_candidates)}件): {[c[1] for c in unique_candidates]}")
-
+        return url, unique_candidates, subject_text, url_msg_id
     except Exception as e:
         logging.error(f"Gmail API 取得エラー: {e}")
-        
-    return url, unique_candidates, subject_text, url_msg_id
+        return None, [], "", None
 
 def fetch_verification_code(service, start_timestamp, processed_label_id):
-    # ★完全に独立した「6桁の連続した数字」だけを抜き出す正規表現
     for _ in range(15):
         time.sleep(3)
         try:
             results = service.users().messages().list(userId='me', q='認証コード OR HENNGE OR 確認コード', maxResults=5).execute()
-            messages = results.get('messages', [])
-            for m in messages:
+            for m in results.get('messages', []):
                 msg = service.users().messages().get(userId='me', id=m['id']).execute()
-                msg_timestamp = int(msg.get('internalDate', 0)) / 1000
-                if msg_timestamp >= start_timestamp - 10:
-                    body = get_email_body(msg['payload'])
-                    clean_body = re.sub(r'<[^>]+>', ' ', body).replace('\r\n', ' ').replace('\n', ' ').replace('\r', ' ')
-                    
+                if int(msg.get('internalDate', 0)) / 1000 >= start_timestamp - 10:
+                    clean_body = re.sub(r'<[^>]+>', ' ', get_email_body(msg['payload'])).replace('\r\n', ' ').replace('\n', ' ')
                     code_match = re.search(r'\b(\d{6})\b', clean_body)
-                    if code_match:
-                        return code_match.group(1).strip(), m['id']
-        except: pass
+                    if code_match: return code_match.group(1).strip(), m['id']
+        except Exception: pass
     return None, None
 
 def download_from_hennge(url, password_candidates, service, processed_label_id):
-    logging.info(f"HENNGEからファイルのダウンロードを開始します URL: {url}")
     my_email = service.users().getProfile(userId='me').execute().get('emailAddress', '')
-    
     for f in glob.glob(str(DOWNLOAD_DIR / '*')): 
         try: os.remove(f)
         except Exception: pass
 
-    options = get_chrome_options()
     driver = None
     try:
         service_chrome = ChromeService(ChromeDriverManager().install())
-        driver = webdriver.Chrome(service=service_chrome, options=options)
+        driver = webdriver.Chrome(service=service_chrome, options=get_chrome_options())
         wait = WebDriverWait(driver, 20)
         driver.get(url)
         time.sleep(3)
 
-        page_source = driver.page_source
-        if "存在しません" in page_source or "見つかりません" in page_source or "Expired" in page_source or "拒否され" in page_source:
-            logging.error(f"リンク先が存在しません / 有効期限切れのエラーが検知されました URL: {url}")
-            return None, None, None
-
-        try:
-            pass_input = wait.until(EC.presence_of_element_located((By.XPATH, "//input[@type='password']")))
-        except Exception:
-            logging.error(f"パスワード入力欄が見つかりません。現在のページタイトル: {driver.title}")
-            return None, None, None
-
+        pass_input = wait.until(EC.presence_of_element_located((By.XPATH, "//input[@type='password']")))
         successful_password, successful_pass_msg_id = None, None
-        
+
         for idx, (score, cand_password, p_subj, p_date, p_msg_id, t_diff) in enumerate(password_candidates):
-            logging.info(f"🔑 パスワード試行中 ({idx + 1}/{len(password_candidates)}): {cand_password}")
             pass_input.clear()
             pass_input.send_keys(cand_password)
             time.sleep(0.5)
-            
             try:
-                submit_btn = driver.find_element(By.XPATH, "//button[@type='submit' or contains(., '送信') or contains(., '次へ') or contains(., '確認')]")
+                submit_btn = driver.find_element(By.XPATH, "//button[@type='submit' or contains(., '送信') or contains(., '次へ')]")
                 driver.execute_script("arguments[0].click();", submit_btn)
-            except Exception:
-                pass_input.send_keys(Keys.RETURN)
+            except Exception: pass_input.send_keys(Keys.RETURN)
             
             time.sleep(2)
-
             try:
                 email_input = WebDriverWait(driver, 4).until(
-                    EC.presence_of_element_located((By.XPATH, "//input[@type='email' or contains(@placeholder, 'メールアドレス') or contains(@name, 'email')]"))
+                    EC.presence_of_element_located((By.XPATH, "//input[@type='email' or contains(@placeholder, 'メールアドレス')]"))
                 )
                 successful_password = cand_password
                 successful_pass_msg_id = p_msg_id
-                logging.info(f"✅ パスワード認証に成功しました: {cand_password}")
                 break
-            except Exception:
-                logging.warning(f"パスワード認証失敗: {cand_password}")
+            except Exception: pass
 
-        if not successful_password:
-            logging.error("一致するダウンロードパスワードが見つかりませんでした。")
-            return None, None, None
+        if not successful_password: return None, None, None
 
         email_input.clear()
         email_input.send_keys(my_email)
         time.sleep(1)
 
         request_timestamp = time.time()
-        send_code_btn = wait.until(EC.presence_of_element_located((By.XPATH, "//button[@type='submit' or contains(., '認証コード') or contains(., '送信')]")))
+        send_code_btn = wait.until(EC.presence_of_element_located((By.XPATH, "//button[@type='submit' or contains(., '認証コード')]")))
         driver.execute_script("arguments[0].click();", send_code_btn)
 
-        logging.info("📧 Gmailから認証コードの受信を待機中...")
         auth_code, auth_msg_id = fetch_verification_code(service, request_timestamp, processed_label_id)
         if not auth_code: raise Exception("認証コードが取得できませんでした。")
-        logging.info(f"✅ 認証コードを受信しました: {auth_code}")
 
-        code_input = wait.until(EC.presence_of_element_located((By.XPATH, "//input[@type='text' or @type='number' or contains(@placeholder, 'コード')]")))
+        code_input = wait.until(EC.presence_of_element_located((By.XPATH, "//input[@type='text' or @type='number']")))
         code_input.clear()
         code_input.send_keys(auth_code)
         time.sleep(1)
 
-        verify_btn = wait.until(EC.presence_of_element_located((By.XPATH, "//button[@type='submit' or contains(., '次へ') or contains(., '認証')]")))
+        verify_btn = wait.until(EC.presence_of_element_located((By.XPATH, "//button[@type='submit' or contains(., '認証')]")))
         driver.execute_script("arguments[0].click();", verify_btn)
 
-        download_btn = wait.until(EC.presence_of_element_located((By.XPATH, "//button[contains(., 'ダウンロード') or contains(., 'Download')]")))
+        download_btn = wait.until(EC.presence_of_element_located((By.XPATH, "//button[contains(., 'ダウンロード')]")))
         time.sleep(2)
         driver.execute_script("arguments[0].click();", download_btn)
 
@@ -584,90 +479,145 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
 
         downloaded_files = glob.glob(str(DOWNLOAD_DIR / '*'))
         if downloaded_files:
-            latest_file = max(downloaded_files, key=os.path.getctime)
-            return latest_file, successful_pass_msg_id, auth_msg_id
-        else: raise Exception("ダウンロードファイルが存在しません。")
-
+            return max(downloaded_files, key=os.path.getctime), successful_pass_msg_id, auth_msg_id
+        return None, None, None
     except Exception as e:
-        logging.error(f"HENNGEダウンロード例外が発生しました: {e}", exc_info=True)
+        logging.error(f"HENNGEダウンロード例外: {e}")
         return None, None, None
     finally:
         if driver: driver.quit()
 
+# --- PDFデータ動的自動解析処理 ---
 def process_pdf_data(pdf_path):
     extracted_data = []
     stop_count, recovery_count = 0, 0
-    current_type, current_action = 'NP', '停止'
-    col_idx = {'MID': 0, '物件名': 1, '部屋番号': 2, '住所': 5, '管理人': 6, 'AL': 7, '備考': 8}
 
-    with pdfplumber.open(pdf_path) as pdf:
-        for page in pdf.pages:
-            tables = page.extract_tables()
-            for table in tables:
-                for row in table:
-                    row_clean = [str(c).strip().replace('\n', '') if c is not None else '' for c in row]
-                    row_str = "".join(row_clean)
-                    if not row_str: continue
+    for page_layout in extract_pages(pdf_path):
+        text_elements = []
+        for element in page_layout:
+            if isinstance(element, LTTextContainer):
+                for text_line in element:
+                    text = text_line.get_text().strip()
+                    if text:
+                        bbox = text_line.bbox
+                        text_elements.append({
+                            'x0': bbox[0],
+                            'y0': bbox[1],
+                            'x1': bbox[2],
+                            'y1': bbox[3],
+                            'text': text
+                        })
 
-                    if 'レジル' in row_str: current_type = 'レジル'
-                    elif any(k in row_str for k in ['旧オリックス', '旧Eハウス', 'NP']): current_type = 'NP'
-                    
-                    if any(k in row_str for k in ['復旧', '復電']): current_action = '復旧'
-                    elif any(k in row_str for k in ['停止', '切断']): current_action = '停止'
+        header_nodes = [el for el in text_elements if 505 <= el['y0'] <= 525]
+        header_nodes.sort(key=lambda e: e['x0'])
 
-                    if '物件名' in row_str and ('部屋番号' in row_str or 'ＭＩＤ' in row_str or 'MID' in row_str):
-                        for i, val in enumerate(row_clean):
-                            if 'MID' in val or 'ＭＩＤ' in val: col_idx['MID'] = i
-                            elif '物件名' in val: col_idx['物件名'] = i
-                            elif '部屋番号' in val: col_idx['部屋番号'] = i
-                            elif '住所' in val: col_idx['住所'] = i
-                            elif '管理' in val: col_idx['管理人'] = i
-                            elif 'AL' in val or 'ｵｰﾄﾛｯｸ' in val or '有無' in val: col_idx['AL'] = i
-                            elif '備考' in val: col_idx['備考'] = i
-                        continue
+        col_headers = []
+        for el in header_nodes:
+            if not col_headers or (el['x0'] - col_headers[-1]['x1']) > 6:
+                col_headers.append({'x0': el['x0'], 'x1': el['x1'], 'text': el['text']})
+            else:
+                col_headers[-1]['text'] += " " + el['text']
+                col_headers[-1]['x1'] = max(col_headers[-1]['x1'], el['x1'])
 
-                    if len(row_clean) <= max(col_idx['物件名'], col_idx['部屋番号']): continue
+        header_map = []
+        for idx, h in enumerate(col_headers):
+            txt = h['text'].lower()
+            key = 'IGNORE'
+            if any(k in txt for k in ['物件id', 'mid', 'ｍｉｄ']): key = 'MID'
+            elif '物件名' in txt: key = '物件名'
+            elif '部屋番号' in txt: key = '部屋番号'
+            elif any(k in txt for k in ['住所', '物件住所']): key = '住所'
+            elif '訪問' in txt: key = '訪問'
+            elif any(k in txt for k in ['在籍', '駐在', '管理員', '管理人', '管理']): key = '管理人'
+            elif any(k in txt for k in ['al', 'オートロック']): key = 'AL'
+            elif '備考' in txt: key = '備考'
 
-                    mid_val = row_clean[col_idx['MID']] if len(row_clean) > col_idx['MID'] else ''
-                    obj_name = row_clean[col_idx['物件名']] if len(row_clean) > col_idx['物件名'] else ''
-                    room_val = row_clean[col_idx['部屋番号']] if len(row_clean) > col_idx['部屋番号'] else ''
+            l_bound = 0.0 if idx == 0 else header_map[-1]['right']
+            if idx == len(col_headers) - 1:
+                r_bound = 9999.0
+            else:
+                next_x0 = col_headers[idx+1]['x0']
+                r_bound = (h['x1'] + next_x0) / 2.0
+                if key in ['訪問', 'AL']:
+                    r_bound = min(r_bound, h['x1'] + 3.0)
 
-                    if not obj_name or not room_val or obj_name.lower() == 'nan': continue
+            header_map.append({'key': key, 'left': l_bound, 'right': r_bound, 'text': h['text']})
 
-                    address = row_clean[col_idx['住所']] if len(row_clean) > col_idx['住所'] else ''
-                    kanri_val = row_clean[col_idx['管理人']] if len(row_clean) > col_idx['管理人'] else ''
-                    al_raw = row_clean[col_idx['AL']] if len(row_clean) > col_idx['AL'] else ''
-                    remark_val = row_clean[col_idx['備考']] if len(row_clean) > col_idx['備考'] else ''
+        mid_header = next((hm for hm in header_map if hm['key'] == 'MID'), None)
+        mid_l = mid_header['left'] if mid_header else 0
+        mid_r = mid_header['right'] if mid_header else 120
 
-                    processed_room = re.sub(r'\.0$', '', room_val)
-                    address = re.sub(r'\.0$', '', address)
+        mids = [el for el in text_elements if re.match(r'^\d+-[R\d]+', el['text']) and mid_l <= el['x0'] < mid_r]
+        mids.sort(key=lambda el: -el['y0'])
 
-                    if '文書投函' in kanri_val or '文書投函' in remark_val: action_status = '文書投函'
-                    elif '復旧' in remark_val or '復旧' in kanri_val: action_status = '復旧'
-                    else: action_status = current_action
+        current_type, current_action = 'レジル', '停止'
 
-                    if action_status == '復旧':
-                        recovery_count += 1
-                        continue
+        for idx, mid in enumerate(mids):
+            mid_y = mid['y0']
+            prev_y = mids[idx - 1]['y0'] if idx > 0 else mid_y + 20
+            next_y = mids[idx + 1]['y0'] if idx < len(mids) - 1 else mid_y - 20
 
-                    stop_count += 1
-                    al_status = '' if al_raw == '' else ('有' if any(k in al_raw for k in ['放', '有', 'あり']) else '無')
+            top_bound = (mid_y + prev_y) / 2.0
+            bottom_bound = (mid_y + next_y) / 2.0
 
-                    extracted_data.append({
-                        '停止or復旧': action_status,
-                        '物件種別': current_type,
-                        '物件名': obj_name,
-                        '部屋番号': processed_room,
-                        '住所': address,
-                        'ＭＩＤ': mid_val,
-                        '管理人': kanri_val,
-                        'AL': al_status,
-                        '備考': remark_val
-                    })
+            row_elements = [el for el in text_elements if bottom_bound <= el['y0'] < top_bound]
+            row_elements.sort(key=lambda el: (-el['y0'], el['x0']))
+
+            field_values = {k: [] for k in ['MID', '物件名', '部屋番号', '住所', '訪問', '管理人', 'AL', '備考', 'IGNORE']}
+            mid_val = mid['text']
+
+            for el in row_elements:
+                x_center = (el['x0'] + el['x1']) / 2.0
+                txt = el['text']
+                if txt == mid_val: continue
+
+                matched_col = None
+                for hm in header_map:
+                    if hm['left'] <= x_center < hm['right']:
+                        matched_col = hm['key']
+                        break
+
+                if matched_col and txt not in field_values[matched_col]:
+                    field_values[matched_col].append(txt)
+
+            obj_name = " ".join(field_values['物件名'])
+            room_val = " ".join(field_values['部屋番号'])
+            addr_raw = " ".join(field_values['住所'])
+            visit_val = "".join(field_values['訪問'])
+            kanri_val = " ".join(field_values['管理人'])
+            al_raw = " ".join(field_values['AL'])
+            remark_val = " ".join(field_values['備考'])
+
+            addr = re.sub(r'^\s*0\s*', '', addr_raw)
+            addr = re.sub(r'^\s*[\d\.]+\s+(?=[一-龠都道府県])', '', addr)
+            addr = re.sub(r'\.0$', '', addr)
+
+            if '文書投函' in visit_val or '文書投函' in remark_val: action_status = '文書投函'
+            elif '復旧' in remark_val or '復旧' in kanri_val: action_status = '復旧'
+            else: action_status = current_action
+
+            if action_status == '復旧':
+                recovery_count += 1
+                continue
+
+            stop_count += 1
+            al_status = '' if not al_raw else ('有' if any(k in al_raw for k in ['放', '有', 'あり']) else '無')
+
+            extracted_data.append({
+                '停止or復旧': action_status,
+                '物件種別': current_type,
+                '物件名': obj_name,
+                '部屋番号': room_val,
+                '住所': addr,
+                'ＭＩＤ': mid_val,
+                '管理人': kanri_val,
+                'AL': al_status,
+                '備考': remark_val
+            })
 
     if not extracted_data:
         return "対象データなし", 0, stop_count, recovery_count, "", None, []
-        
+
     return create_output_csv(extracted_data, stop_count, recovery_count)
 
 def process_excel_data(excel_path):
@@ -682,9 +632,10 @@ def process_excel_data(excel_path):
     if header_idx is None: raise ValueError("ヘッダーが見つかりませんでした。")
 
     cols = [str(x).strip() for x in full_sheet.iloc[header_idx]]
-    def get_c(name): 
-        for idx, col_name in enumerate(cols):
-            if name in col_name: return idx
+    def get_c(*names): 
+        for name in names:
+            for idx, col_name in enumerate(cols):
+                if name in col_name: return idx
         return -1
 
     extracted_data = []
@@ -706,7 +657,7 @@ def process_excel_data(excel_path):
         if 'レジル' in row_str and '＜' not in row_str: current_type = 'レジル'
         if '旧オリックス' in row_str or '旧Eハウス' in row_str: current_type = 'NP'
 
-        mid_col, obj_col, room_col = get_c('ＭＩＤ'), get_c('物件名'), get_c('部屋番号')
+        mid_col, obj_col, room_col = get_c('ＭＩＤ', 'MID'), get_c('物件名'), get_c('部屋番号')
         if mid_col == -1 or obj_col == -1 or room_col == -1: continue
         
         mid_val = str(row[mid_col]).strip()
@@ -720,12 +671,14 @@ def process_excel_data(excel_path):
         if not obj_name or not room_val: continue
 
         processed_room = re.sub(r'\.0$', '', room_val)
-        pref_col, addr_col = get_c('都道府県'), get_c('物件住所')
+
+        pref_col, addr_col = get_c('都道府県'), get_c('物件住所', '住所')
         pref = str(row[pref_col]).strip() if pref_col != -1 else ''
         addr = str(row[addr_col]).strip() if addr_col != -1 else ''
-        full_address = re.sub(r'\.0$', '', pref) + re.sub(r'\.0$', '', addr)
+        full_address = re.sub(r'^\s*0\s*', '', pref + addr)
+        full_address = re.sub(r'\.0$', '', full_address)
 
-        al_col = get_c('AL')
+        al_col = get_c('AL', 'オートロック')
         al_raw = str(row[al_col]).strip() if al_col != -1 else ''
         al_status = '' if (al_raw == '' or al_raw.lower() == 'nan') else ('有' if any(k in al_raw for k in ['放', '有', 'あり']) else '無')
         
@@ -734,8 +687,9 @@ def process_excel_data(excel_path):
         remark_val = '' if remark_val.lower() == 'nan' else remark_val
         
         action_status = '文書投函' if '文書投函' in remark_val else current_action
-        kanri_col = get_c('管理員') if get_c('管理員') != -1 else get_c('管理')
+        kanri_col = get_c('管理員様在籍日時', '管理人駐在時間', '管理員', '管理')
         kanri_val = str(row[kanri_col]).strip() if kanri_col != -1 else ''
+        kanri_val = '' if kanri_val.lower() == 'nan' else kanri_val
         
         if '復旧' in remark_val or '復旧' in kanri_val: action_status = '復旧'
             
@@ -762,10 +716,12 @@ def process_excel_data(excel_path):
         
     return create_output_csv(extracted_data, stop_count, recovery_count)
 
+# --- エラー原因の「     備考     」を除外した完全なCSV生成処理 ---
 def create_output_csv(extracted_data, stop_count, recovery_count):
-    REMARK_COL_1 = "\u3000" * 5 + "備考" + "\u3000" * 5
+    # BLASに登録されている唯一の備考用項目名（末尾スペース52文字）
     REMARK_COL_2 = "レジル様記入備考" + " " * 52
 
+    # エラーとなる「     備考     」を除外した正規の47項目定義
     ALL_HEADERS = [
         'BLAS_データ管理番号', 'BLAS_担当会社', '停止or復旧', '物件種別', '物件名', 
         '部屋番号※番号のみ入力', '物件住所', '工事会社', '作業者', '作業日', 
@@ -774,7 +730,7 @@ def create_output_csv(extracted_data, stop_count, recovery_count):
         '退館時刻', 'ステータス', '脚立の必要有無', '脚立必要の場合：メーターの高さや必要な脚立の高さ', 
         'パネルの有無', 'パネルありの場合：パネルの大きさやビス数、位置高さ', '鍵の必要有無', '鍵が必要な場合：必要な鍵', 
         '【退館前】撮影写真に不備はないか', '【退館前】ゴミ・忘れものはしていないか', '駐車場', 
-        REMARK_COL_1, REMARK_COL_2, 
+        REMARK_COL_2, 
         'BLAS_ゴミ箱', 'BLAS_データ未完了', 'BLAS_画像未完了', 'BLAS_親データ管理番号', 
         '【協力会社のみ登録】腕章は携帯しているか', '【作業前】盤全景写真', '【作業前】', '【作業中】', 
         '【作業後】', '【文書投函写真】', '予備1', '予備2', '予備3', '予備4', '予備5'
@@ -903,7 +859,6 @@ if __name__ == '__main__':
             
             shutil.move(str(unique_csv_path), PROCESSED_DIR / f"output_{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}.csv")
             
-            # ★ファイル名から地域情報を取得し、Larkシート書き込みに渡す
             detected_region = get_region_from_info(file_name, p_addr)
             write_to_lark_sheet(ext_data, detected_region)
 
