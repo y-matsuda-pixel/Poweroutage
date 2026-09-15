@@ -380,7 +380,7 @@ def fetch_hennge_details(service, processed_label_id):
 
             if url_match and not url:
                 raw_url = url_match.group(1)
-                url = raw_url.rstrip('。、.）」】\t\r\n ').rstrip('.')
+                url = raw_url.rstrip('。、.）」】)\] \t\r\n').rstrip('.')
                 url_msg_id = m['id']
                 url_thread_id = msg.get('threadId', '')
                 url_from = headers.get('from', '')
@@ -421,17 +421,18 @@ def fetch_hennge_details(service, processed_label_id):
             clean_body_pass = re.sub(r'<[^>]+>', ' ', body_pass).replace('\r\n', ' ').replace('\n', ' ').replace('\r', ' ')
             
             patterns = [
-                r'(?:ファイルダウンロードパスワード|ファイルパスワード|ダウンロードパスワード|パスワード|Password)[:：\s\n]+([a-zA-Z0-9=!@#$%^&*()_+\-=\[\]{};:\'",.<>/?`]{6,32})',
-                r'(?:ファイルダウンロードパスワード|ファイルパスワード|ダウンロードパスワード|パスワード|Password)[:：\s\n]+([\x21-\x7e]{6,32})'
+                r'(?:ファイルダウンロードパスワード|ファイルパスワード|ダウンロードパスワード|パスワード|Password)[:：\s\n]+([a-zA-Z0-9=!@#$%^&*()_+\-=\[\]{};:\'",.<>/?`]{12,32})',
+                r'(?:ファイルダウンロードパスワード|ファイルパスワード|ダウンロードパスワード|パスワード|Password)[:：\s\n]+([\x21-\x7e]{12,32})'
             ]
             
             found_cands = []
             for pat in patterns:
                 for match_item in re.finditer(pat, clean_body_pass, re.IGNORECASE):
-                    # バッククォート(`)やシングルクォート(')を除去しないように変更
+                    # バッククォートなどを剥がさずにいったん取得
                     c_val = match_item.group(1).strip().strip('。、.）」】 \t\r\n')
                     if not c_val.isascii(): continue
-                    if not (6 <= len(c_val) <= 32): continue
+                    # ★パスワードは必ず「12桁」である条件を厳密に適用
+                    if len(c_val) != 12: continue
                     if any(w in c_val.lower() for w in ["password", "japanese", "english", "hennge", "transfer", "http", "https", "mailto", "url", "download"]): continue
                     found_cands.append(c_val)
 
@@ -459,6 +460,8 @@ def fetch_hennge_details(service, processed_label_id):
     return url, unique_candidates, subject_text, url_msg_id
 
 def fetch_verification_code(service, start_timestamp, processed_label_id):
+    # ★誤検出されやすい英単語を無視リストに追加 (below問題の修正)
+    ignore_words = {'below', 'here', 'above', 'your', 'code', 'this', 'that', 'from', 'with'}
     for _ in range(15):
         time.sleep(3)
         try:
@@ -469,14 +472,26 @@ def fetch_verification_code(service, start_timestamp, processed_label_id):
                 msg_timestamp = int(msg.get('internalDate', 0)) / 1000
                 if msg_timestamp >= start_timestamp - 10:
                     body = get_email_body(msg['payload'])
-                    code_match = re.search(r'(?:認証コード|確認コード|code)[:：\s\n]+([A-Za-z0-9]{4,8})', body, re.IGNORECASE)
-                    if not code_match: code_match = re.search(r'\b(\d{6})\b', body)
-                    if code_match: return code_match.group(1).strip(), m['id']
-        except: pass
+                    clean_body = re.sub(r'<[^>]+>', ' ', body).replace('\r\n', ' ').replace('\n', ' ').replace('\r', ' ')
+                    
+                    # 優先1: 独立した4〜8桁の数字（一般的なワンタイムパスワード）
+                    code_match = re.search(r'\b(\d{4,8})\b', clean_body)
+                    if code_match:
+                        return code_match.group(1).strip(), m['id']
+
+                    # 優先2: 認証コードラベル直後の文字列（ノイズ単語を除外）
+                    matches = re.finditer(r'(?:認証コード|確認コード|code|verification)[:：\s\n]+([A-Za-z0-9]{4,8})', clean_body, re.IGNORECASE)
+                    for match in matches:
+                        cand = match.group(1).strip()
+                        if cand.lower() not in ignore_words:
+                            return cand, m['id']
+        except Exception as e:
+            logging.warning(f"認証コード検索中の警告: {e}")
     return None, None
 
 def download_from_hennge(url, password_candidates, service, processed_label_id):
-    logging.info(f"HENNGEからファイルのダウンロードを開始します (URL: {url})")
+    # ★ログの (URL: xxx) 表記をやめ、リンク誤認を防ぐ
+    logging.info(f"HENNGEからファイルのダウンロードを開始します URL: {url}")
     my_email = service.users().getProfile(userId='me').execute().get('emailAddress', '')
     
     for f in glob.glob(str(DOWNLOAD_DIR / '*')): 
@@ -493,8 +508,8 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
         time.sleep(3)
 
         page_source = driver.page_source
-        if "存在しません" in page_source or "見つかりません" in page_source or "Expired" in page_source:
-            logging.error(f"リンク先が存在しません / 有効期限切れのエラーが検知されました (URL: {url})")
+        if "存在しません" in page_source or "見つかりません" in page_source or "Expired" in page_source or "拒否され" in page_source:
+            logging.error(f"リンク先が存在しません / 有効期限切れのエラーが検知されました URL: {url}")
             return None, None, None
 
         try:
