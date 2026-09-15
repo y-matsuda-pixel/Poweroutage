@@ -77,6 +77,7 @@ def get_chrome_options():
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
     options.add_argument("--window-size=1920,1080")
+    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
     prefs = {
         "download.default_directory": str(DOWNLOAD_DIR),
         "download.prompt_for_download": False,
@@ -378,7 +379,6 @@ def fetch_hennge_details(service, processed_label_id):
             url_match = re.search(r'(https://[a-zA-Z0-9.-]*transfer\.hennge\.com/[^\s"\'<>]+)', clean_body)
 
             if url_match and not url:
-                # 末尾の不要な記号・句読点・ピリオド・空白を除去
                 raw_url = url_match.group(1)
                 url = raw_url.rstrip('。、.）」】\t\r\n ').rstrip('.')
                 url_msg_id = m['id']
@@ -403,7 +403,6 @@ def fetch_hennge_details(service, processed_label_id):
 
         for m in messages_pass:
             time.sleep(0.1)
-            if m['id'] == url_msg_id: continue
             msg = service.users().messages().get(userId='me', id=m['id']).execute()
             p_thread_id = msg.get('threadId', '')
             p_label_ids = msg.get('labelIds', [])
@@ -416,23 +415,26 @@ def fetch_hennge_details(service, processed_label_id):
             p_timestamp = int(msg.get('internalDate', 0)) / 1000
             
             time_diff = abs(p_timestamp - url_msg_timestamp)
-            if time_diff > 7200: continue
+            if time_diff > 7200 and m['id'] != url_msg_id: continue
 
             body_pass = get_email_body(msg['payload'])
             clean_body_pass = re.sub(r'<[^>]+>', ' ', body_pass).replace('\r\n', ' ').replace('\n', ' ').replace('\r', ' ')
             
-            patterns = [r'(?:ファイルダウンロードパスワード|ファイルパスワード|ダウンロードパスワード|パスワード|Password)[:：\s]+([\x21-\x7e]+)']
-            cand = None
+            patterns = [
+                r'(?:ファイルダウンロードパスワード|ファイルパスワード|ダウンロードパスワード|パスワード|Password)[:：\s\n]+([a-zA-Z0-9=!@#$%^&*()_+\-=\[\]{};:\'",.<>/?]{6,32})',
+                r'(?:ファイルダウンロードパスワード|ファイルパスワード|ダウンロードパスワード|パスワード|Password)[:：\s\n]+([\x21-\x7e]{6,32})'
+            ]
+            
+            found_cands = []
             for pat in patterns:
                 for match_item in re.finditer(pat, clean_body_pass, re.IGNORECASE):
-                    c_val = match_item.group(1).strip().rstrip('。、.）」】')
-                    if not c_val.isascii() or len(c_val) != 12: continue
-                    if c_val.lower() in ["password", "japanese", "english", "hennge", "transfer", "http", "https", "mailto", "url"]: continue
-                    cand = c_val
-                    break
-                if cand: break
+                    c_val = match_item.group(1).strip().rstrip('。、.）」】\t\r\n ')
+                    if not c_val.isascii(): continue
+                    if not (6 <= len(c_val) <= 32): continue
+                    if any(w in c_val.lower() for w in ["password", "japanese", "english", "hennge", "transfer", "http", "https", "mailto", "url", "download"]): continue
+                    found_cands.append(c_val)
 
-            if cand:
+            for cand in found_cands:
                 score = time_diff
                 if not is_p_processed: score -= 1000
                 if url_from and p_from and (url_from in p_from or p_from in url_from): score -= 500
@@ -447,6 +449,8 @@ def fetch_hennge_details(service, processed_label_id):
             if c_item[1] not in seen_pw:
                 seen_pw.add(c_item[1])
                 unique_candidates.append(c_item)
+
+        logging.info(f"🔑 パスワード候補を抽出しました ({len(unique_candidates)}件): {[c[1] for c in unique_candidates]}")
 
     except Exception as e:
         logging.error(f"Gmail API 取得エラー: {e}")
@@ -487,42 +491,46 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
         driver.get(url)
         time.sleep(3)
 
-        # ページ読み込み後のチェック
         page_source = driver.page_source
         if "存在しません" in page_source or "見つかりません" in page_source or "Expired" in page_source:
-            logging.error(f"❌ HENNGE画面で『リンク先が存在しません / 有効期限切れ』のエラーが検知されました。 (URL: {url})")
+            logging.error(f"リンク先が存在しません / 有効期限切れのエラーが検知されました (URL: {url})")
             return None, None, None
 
         try:
             pass_input = wait.until(EC.presence_of_element_located((By.XPATH, "//input[@type='password']")))
-        except Exception as e:
-            logging.error(f"❌ パスワード入力欄が見つかりません。現在のページタイトル: {driver.title}")
+        except Exception:
+            logging.error(f"パスワード入力欄が見つかりません。現在のページタイトル: {driver.title}")
             return None, None, None
 
         successful_password, successful_pass_msg_id = None, None
         
-        for score, cand_password, p_subj, p_date, p_msg_id, t_diff in password_candidates:
+        for idx, (score, cand_password, p_subj, p_date, p_msg_id, t_diff) in enumerate(password_candidates):
+            logging.info(f"🔑 パスワード試行中 ({idx + 1}/{len(password_candidates)}): {cand_password}")
             pass_input.clear()
             pass_input.send_keys(cand_password)
             time.sleep(0.5)
+            
             try:
-                submit_btn = driver.find_element(By.XPATH, "//button[@type='submit']")
+                submit_btn = driver.find_element(By.XPATH, "//button[@type='submit' or contains(., '送信') or contains(., '次へ') or contains(., '確認')]")
                 driver.execute_script("arguments[0].click();", submit_btn)
             except Exception:
                 pass_input.send_keys(Keys.RETURN)
-            time.sleep(1.5)
+            
+            time.sleep(2)
 
             try:
-                email_input = WebDriverWait(driver, 3).until(
-                    EC.presence_of_element_located((By.XPATH, "//input[@type='email' or contains(@placeholder, 'メールアドレス')]"))
+                email_input = WebDriverWait(driver, 4).until(
+                    EC.presence_of_element_located((By.XPATH, "//input[@type='email' or contains(@placeholder, 'メールアドレス') or contains(@name, 'email')]"))
                 )
                 successful_password = cand_password
                 successful_pass_msg_id = p_msg_id
+                logging.info(f"✅ パスワード認証に成功しました: {cand_password}")
                 break
-            except Exception: pass
+            except Exception:
+                logging.warning(f"パスワード認証失敗: {cand_password}")
 
         if not successful_password:
-            logging.error("❌ 一致するダウンロードパスワードが見つかりませんでした。")
+            logging.error("一致するダウンロードパスワードが見つかりませんでした。")
             return None, None, None
 
         email_input.clear()
@@ -533,8 +541,10 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
         send_code_btn = wait.until(EC.presence_of_element_located((By.XPATH, "//button[@type='submit' or contains(., '認証コード') or contains(., '送信')]")))
         driver.execute_script("arguments[0].click();", send_code_btn)
 
+        logging.info("📧 Gmailから認証コードの受信を待機中...")
         auth_code, auth_msg_id = fetch_verification_code(service, request_timestamp, processed_label_id)
         if not auth_code: raise Exception("認証コードが取得できませんでした。")
+        logging.info(f"✅ 認証コードを受信しました: {auth_code}")
 
         code_input = wait.until(EC.presence_of_element_located((By.XPATH, "//input[@type='text' or @type='number' or contains(@placeholder, 'コード')]")))
         code_input.clear()
@@ -562,7 +572,7 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
         else: raise Exception("ダウンロードファイルが存在しません。")
 
     except Exception as e:
-        logging.error(f"HENNGEダウンロード失敗: {e}")
+        logging.error(f"HENNGEダウンロード例外が発生しました: {e}", exc_info=True)
         return None, None, None
     finally:
         if driver: driver.quit()
@@ -788,7 +798,7 @@ def create_output_csv(extracted_data, stop_count, recovery_count):
     first_address = extracted_data[0]['住所'] if extracted_data else ""
     return extracted_data[0]['物件名'], len(df_final), stop_count, recovery_count, first_address, unique_csv_path, extracted_data
 
-# --- メイン処理（BLAS登録セッションを実績コード通り単一管理化） ---
+# --- メイン処理 ---
 if __name__ == '__main__':
     logging.info("=== 自動処理を開始します ===")
     gmail_service = get_gmail_service()
@@ -797,7 +807,7 @@ if __name__ == '__main__':
     target_url, password_candidates, subject_text, url_msg_id = fetch_hennge_details(gmail_service, processed_label_id)
     
     if not target_url or not password_candidates:
-        logging.info("有効な対象メールが見つかりませんでした。処理を終了します。")
+        logging.info("有効な対象メールまたはパスワードが見つかりませんでした。処理を終了します。")
         exit(0)
         
     downloaded_file_path, pass_msg_id, auth_msg_id = download_from_hennge(target_url, password_candidates, gmail_service, processed_label_id)
@@ -815,7 +825,6 @@ if __name__ == '__main__':
         logging.error("❌ PDF/Excelファイルが見つかりません。")
         exit(1)
 
-    # --- BLAS自動ログイン（実績コードと同仕様：1回ログインしセッション維持） ---
     options = get_chrome_options()
     driver = None
     wait = None
@@ -829,7 +838,7 @@ if __name__ == '__main__':
         wait.until(EC.presence_of_element_located((By.NAME, "username"))).send_keys(BASIS_USERNAME)
         driver.find_element(By.NAME, "password").send_keys(BASIS_PASSWORD)
         driver.find_element(By.XPATH, "//input[@type='submit']").click()
-        time.sleep(5)  # 実績コード同様、ログイン後5秒スリープで完全読み込みを待機
+        time.sleep(5)
     except Exception as e:
         logging.error(f"BLAS初期ログイン失敗: {e}")
         if driver: driver.quit()
@@ -854,7 +863,6 @@ if __name__ == '__main__':
             if TEST_CSV_ONLY:
                 continue
 
-            # --- BLAS登録処理（実績コードそのままの手順） ---
             driver.get("https://www.basis-service.com/blas70/items")
             wait.until(EC.element_to_be_clickable((By.CLASS_NAME, "select2-selection__arrow"))).click()
             search_field = wait.until(EC.presence_of_element_located((By.CLASS_NAME, "select2-search__field")))
@@ -876,10 +884,7 @@ if __name__ == '__main__':
             
             time.sleep(10)
             
-            # 生成したCSVをprocessedディレクトリに移動
             shutil.move(str(unique_csv_path), PROCESSED_DIR / f"output_{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}.csv")
-            
-            # Larkスプレッドシートへの自動転記
             write_to_lark_sheet(ext_data)
 
             os.remove(file_path)
@@ -895,14 +900,11 @@ if __name__ == '__main__':
             logging.error(f"❌ エラーが発生しました ({file_name}): {e}")
             failure_items.append((file_name, str(e)))
 
-    # ブラウザセッションを安全に終了
     if driver:
         driver.quit()
 
-    # Larkカード通知の送信
     send_combined_lark_report(success_items, failure_items)
 
-    # 全処理成功時のみ「処理済み」ラベルを付与
     if not failure_items and success_items:
         add_processed_label(gmail_service, [url_msg_id, pass_msg_id, auth_msg_id], processed_label_id)
 
