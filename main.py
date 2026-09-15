@@ -421,14 +421,15 @@ def fetch_hennge_details(service, processed_label_id):
             clean_body_pass = re.sub(r'<[^>]+>', ' ', body_pass).replace('\r\n', ' ').replace('\n', ' ').replace('\r', ' ')
             
             patterns = [
-                r'(?:ファイルダウンロードパスワード|ファイルパスワード|ダウンロードパスワード|パスワード|Password)[:：\s\n]+([a-zA-Z0-9=!@#$%^&*()_+\-=\[\]{};:\'",.<>/?]{6,32})',
+                r'(?:ファイルダウンロードパスワード|ファイルパスワード|ダウンロードパスワード|パスワード|Password)[:：\s\n]+([a-zA-Z0-9=!@#$%^&*()_+\-=\[\]{};:\'",.<>/?`]{6,32})',
                 r'(?:ファイルダウンロードパスワード|ファイルパスワード|ダウンロードパスワード|パスワード|Password)[:：\s\n]+([\x21-\x7e]{6,32})'
             ]
             
             found_cands = []
             for pat in patterns:
                 for match_item in re.finditer(pat, clean_body_pass, re.IGNORECASE):
-                    c_val = match_item.group(1).strip().rstrip('。、.）」】\t\r\n ')
+                    # バッククォート(`)やシングルクォート(')を除去しないように変更
+                    c_val = match_item.group(1).strip().strip('。、.）」】 \t\r\n')
                     if not c_val.isascii(): continue
                     if not (6 <= len(c_val) <= 32): continue
                     if any(w in c_val.lower() for w in ["password", "japanese", "english", "hennge", "transfer", "http", "https", "mailto", "url", "download"]): continue
