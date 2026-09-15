@@ -428,10 +428,9 @@ def fetch_hennge_details(service, processed_label_id):
             found_cands = []
             for pat in patterns:
                 for match_item in re.finditer(pat, clean_body_pass, re.IGNORECASE):
-                    # バッククォートなどを剥がさずにいったん取得
                     c_val = match_item.group(1).strip().strip('。、.）」】 \t\r\n')
                     if not c_val.isascii(): continue
-                    # ★パスワードは必ず「12桁」である条件を厳密に適用
+                    # ★パスワードは必ず「12桁」である条件
                     if len(c_val) != 12: continue
                     if any(w in c_val.lower() for w in ["password", "japanese", "english", "hennge", "transfer", "http", "https", "mailto", "url", "download"]): continue
                     found_cands.append(c_val)
@@ -460,8 +459,7 @@ def fetch_hennge_details(service, processed_label_id):
     return url, unique_candidates, subject_text, url_msg_id
 
 def fetch_verification_code(service, start_timestamp, processed_label_id):
-    # ★誤検出されやすい英単語を無視リストに追加 (below問題の修正)
-    ignore_words = {'below', 'here', 'above', 'your', 'code', 'this', 'that', 'from', 'with'}
+    # ★「belowを拾う問題」の完全解決: 必ず6桁の数字だけを抽出する
     for _ in range(15):
         time.sleep(3)
         try:
@@ -474,23 +472,15 @@ def fetch_verification_code(service, start_timestamp, processed_label_id):
                     body = get_email_body(msg['payload'])
                     clean_body = re.sub(r'<[^>]+>', ' ', body).replace('\r\n', ' ').replace('\n', ' ').replace('\r', ' ')
                     
-                    # 優先1: 独立した4〜8桁の数字（一般的なワンタイムパスワード）
-                    code_match = re.search(r'\b(\d{4,8})\b', clean_body)
+                    # 完全に独立した「6桁の連続した数字」だけを抜き出す正規表現
+                    code_match = re.search(r'\b(\d{6})\b', clean_body)
                     if code_match:
                         return code_match.group(1).strip(), m['id']
-
-                    # 優先2: 認証コードラベル直後の文字列（ノイズ単語を除外）
-                    matches = re.finditer(r'(?:認証コード|確認コード|code|verification)[:：\s\n]+([A-Za-z0-9]{4,8})', clean_body, re.IGNORECASE)
-                    for match in matches:
-                        cand = match.group(1).strip()
-                        if cand.lower() not in ignore_words:
-                            return cand, m['id']
-        except Exception as e:
-            logging.warning(f"認証コード検索中の警告: {e}")
+        except: pass
     return None, None
 
 def download_from_hennge(url, password_candidates, service, processed_label_id):
-    # ★ログの (URL: xxx) 表記をやめ、リンク誤認を防ぐ
+    # ★ログ表示の (URL: xxx) をやめ、綺麗に URL: https://... と出力されるように修正
     logging.info(f"HENNGEからファイルのダウンロードを開始します URL: {url}")
     my_email = service.users().getProfile(userId='me').execute().get('emailAddress', '')
     
