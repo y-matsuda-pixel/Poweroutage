@@ -66,7 +66,6 @@ KANTO_CITIES = ['横浜市', '川崎市', 'さいたま市', '千葉市', '相�
 TEST_DOWNLOAD_ONLY = False
 TEST_CSV_ONLY = False
 
-# GitHub Actionsでログが確実に表示されるよう flush を有効化
 LOG_DIR = BASE_DIR / "log"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 log_filename = f"selenium_log_{datetime.datetime.now().strftime('%Y%m%d')}.log"
@@ -82,7 +81,6 @@ logging.basicConfig(
 SCOPES = ['https://www.googleapis.com/auth/gmail.modify']
 
 def log_flush(msg, level=logging.INFO):
-    """即座にログを出力してGitHub Actionsの画面に表示させるための関数"""
     logging.log(level, msg)
     sys.stdout.flush()
 
@@ -208,7 +206,7 @@ def write_to_lark_sheet(extracted_data, detected_region):
         action = f"【{d['停止or復旧']}】"
         subject = f"{action}{d['物件名']} {d['部屋番号']}"
 
-        row_bj = ["", team, action, d['物件種别'], subject, next_biz_day, 1, 35000, 3500]
+        row_bj = ["", team, action, d['物件種別'], subject, next_biz_day, 1, 35000, 3500]
 
         body_bj = {
             "valueRange": {
@@ -378,10 +376,7 @@ def fetch_hennge_details(service, processed_label_id):
             log_flush("❌ 対象のHENNGE URLを含む未処理メールが見つかりませんでした。")
             return None, [], "", None
 
-        # ★ URLの取得結果を確実に表示
-        log_flush("--------------------------------------------------")
         log_flush(f"🔗 取得したダウンロードURL: {url}")
-        log_flush("--------------------------------------------------")
 
         url_dt = datetime.datetime.fromtimestamp(url_msg_timestamp)
         after_date = url_dt.strftime('%Y/%m/%d')
@@ -397,28 +392,18 @@ def fetch_hennge_details(service, processed_label_id):
             time_diff = abs(p_timestamp - url_msg_timestamp)
             if time_diff > 7200 and m['id'] != url_msg_id: continue
 
-            clean_body_pass = re.sub(r'<[^>]+>', ' ', get_email_body(msg['payload'])).replace('\r\n', ' ').replace('\n', ' ')
+            # HTMLタグ除去と改行の統一
+            clean_body_pass = re.sub(r'<[^>]+>', ' ', get_email_body(msg['payload'])).replace('\r\n', '\n').replace('\r', '\n')
             
-            # ★【最重要】ハイフン区切り線などを完全に無視して、パスワード部分だけを抜き出す
-            patterns = [
-                r'(?:ファイルダウンロードパスワード|ファイルパスワード|ダウンロードパスワード|パスワード|Password)[:：\s\n]+([\x21-\x7e]{8,64})'
-            ]
-            for pat in patterns:
-                for match_item in re.finditer(pat, clean_body_pass, re.IGNORECASE):
-                    raw_val = match_item.group(1)
-                    # 記号や空白を取り除く
-                    c_val = raw_val.strip().strip('。、.）」】 \t\r\n')
-                    
-                    # 万が一「-------------」という線がくっついていたら分離する
-                    if '-' * 4 in c_val:
-                        c_val = c_val.split('-')[0]
-                    if '_' * 4 in c_val:
-                        c_val = c_val.split('_')[0]
-                        
-                    # 完全に12文字であれば採用
-                    if len(c_val) == 12 and c_val.isascii():
-                        if not any(w in c_val.lower() for w in ["password", "japanese", "english", "hennge", "transfer", "http", "https"]):
-                            candidates.append((time_diff, c_val, headers.get('subject', ''), headers.get('date', ''), m['id'], time_diff))
+            # ★ 究極にシンプルな「ラベルの直後にある空白以外の12文字」を抽出するロジック
+            pat = r'(?:ファイルダウンロードパスワード|ファイルパスワード|ダウンロードパスワード|パスワード|Password)[:：]\s*\n?\s*([^\s]{12})'
+            
+            for match_item in re.finditer(pat, clean_body_pass, re.IGNORECASE):
+                c_val = match_item.group(1)
+                
+                # 万一のためにURL系の文字列は除外する
+                if not any(w in c_val.lower() for w in ["password", "japanese", "english", "hennge", "transfer", "http", "https"]):
+                    candidates.append((time_diff, c_val, headers.get('subject', ''), headers.get('date', ''), m['id'], time_diff))
 
         candidates.sort(key=lambda x: x[0])
         unique_candidates = []
@@ -480,17 +465,23 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
 
         for idx, (score, cand_password, p_subj, p_date, p_msg_id, t_diff) in enumerate(password_candidates):
             log_flush(f"🔑 パスワード入力試行中 ({idx + 1}/{len(password_candidates)}): {cand_password}")
+            
             pass_input.clear()
+            driver.execute_script("arguments[0].focus();", pass_input)
             pass_input.send_keys(cand_password)
+            driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", pass_input)
+            driver.execute_script("arguments[0].dispatchEvent(new Event('change', { bubbles: true }));", pass_input)
             time.sleep(0.5)
+            
             try:
                 submit_btn = driver.find_element(By.XPATH, "//button[@type='submit' or contains(., '送信') or contains(., '次へ')]")
                 driver.execute_script("arguments[0].click();", submit_btn)
-            except Exception: pass_input.send_keys(Keys.RETURN)
+            except Exception: 
+                pass_input.send_keys(Keys.RETURN)
             
             time.sleep(2)
             try:
-                email_input = WebDriverWait(driver, 4).until(
+                email_input = WebDriverWait(driver, 10).until(
                     EC.presence_of_element_located((By.XPATH, "//input[@type='email' or contains(@placeholder, 'メールアドレス')]"))
                 )
                 successful_password = cand_password
