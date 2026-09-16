@@ -452,32 +452,6 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
             return None, None, None
 
         # ==========================================
-        # パターンA: すでに認証完了済み画面の場合
-        # ==========================================
-        try:
-            direct_download_btns = driver.find_elements(By.XPATH, "//button[contains(@aria-label, 'ダウンロード')] | //button[contains(., 'ダウンロード')] | //a[contains(., 'ダウンロード')]")
-            for btn in direct_download_btns:
-                if btn.is_displayed():
-                    log_flush("ℹ️ すでに認証済み画面が表示されています。直接『ダウンロード』を実行します。")
-                    try: btn.click()
-                    except Exception: driver.execute_script("arguments[0].click();", btn)
-                    
-                    wait_time = 0
-                    while wait_time < 60:
-                        time.sleep(2)
-                        wait_time += 2
-                        files = os.listdir(DOWNLOAD_DIR)
-                        if files and not any(f.endswith('.crdownload') or f.endswith('.tmp') for f in files): break
-
-                    downloaded_files = glob.glob(str(DOWNLOAD_DIR / '*'))
-                    if downloaded_files:
-                        latest_file = max(downloaded_files, key=os.path.getctime)
-                        log_flush(f"✅ ファイルダウンロード成功: {latest_file}")
-                        return latest_file, None, None
-        except Exception:
-            pass
-
-        # ==========================================
         # STEP 1: パスワード入力
         # ==========================================
         email_input = None
@@ -594,8 +568,7 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
         """, code_input)
         time.sleep(0.5)
 
-        log_flush("🔘 認証実行（フォーム送信）を行います")
-        # 画面上の認証/送信ボタンを取得し、disabled属性を解除してクリック
+        log_flush("🔘 認証実行ボタンを強制クリックします")
         verify_clicked = False
         try:
             verify_btns = driver.find_elements(By.XPATH, "//button[@type='submit' or contains(., '認証') or contains(., '次へ') or contains(., '確認')] | //input[@type='submit']")
@@ -624,7 +597,7 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
         log_flush("📥 『ダウンロード』ボタンを探してクリックします")
         
         download_clicked = False
-        for attempt in range(10): # 2秒おきに10回試行 (計20秒待機)
+        for attempt in range(10):
             download_clicked = driver.execute_script("""
                 const els = document.querySelectorAll('button, a, div[role="button"], span');
                 for (let el of els) {
@@ -647,7 +620,6 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
             log_flush(f"❌ ダウンロードボタンが発見できませんでした。画面表示: {body_text}", logging.ERROR)
             return None, None, None
 
-        # ファイル生成を待機
         wait_time = 0
         while wait_time < 60:
             time.sleep(2)
@@ -953,6 +925,7 @@ def create_output_csv(extracted_data, stop_count, recovery_count):
 
 # --- メイン処理 ---
 if __name__ == '__main__':
+    log_flush("=== VERSION_CHECK_555 ===")
     log_flush("=== 自動処理を開始します ===")
     gmail_service = get_gmail_service()
     processed_label_id = get_or_create_processed_label_id(gmail_service, "処理済み")
