@@ -43,4 +43,8 @@ jobs:
           LARK_WIKI_TOKEN: ${{ secrets.LARK_WIKI_TOKEN }}
           DEFAULT_SHEET_ID: ${{ secrets.DEFAULT_SHEET_ID }}
         run: |
+          echo "=== Git Commit Info ==="
+          git log -1 --oneline
+          echo "=== main.py Head Check ==="
+          head -n 25 main.py
           python main.py
