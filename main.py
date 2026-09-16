@@ -392,16 +392,12 @@ def fetch_hennge_details(service, processed_label_id):
             time_diff = abs(p_timestamp - url_msg_timestamp)
             if time_diff > 7200 and m['id'] != url_msg_id: continue
 
-            # HTMLタグ除去と改行の統一
             clean_body_pass = re.sub(r'<[^>]+>', ' ', get_email_body(msg['payload'])).replace('\r\n', '\n').replace('\r', '\n')
             
-            # ★ 究極にシンプルな「ラベルの直後にある空白以外の12文字」を抽出するロジック
             pat = r'(?:ファイルダウンロードパスワード|ファイルパスワード|ダウンロードパスワード|パスワード|Password)[:：]\s*\n?\s*([^\s]{12})'
             
             for match_item in re.finditer(pat, clean_body_pass, re.IGNORECASE):
-                c_val = match_item.group(1)
-                
-                # 万一のためにURL系の文字列は除外する
+                c_val = match_item.group(1).strip()
                 if not any(w in c_val.lower() for w in ["password", "japanese", "english", "hennge", "transfer", "http", "https"]):
                     candidates.append((time_diff, c_val, headers.get('subject', ''), headers.get('date', ''), m['id'], time_diff))
 
@@ -468,54 +464,95 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
             
             pass_input.clear()
             driver.execute_script("arguments[0].focus();", pass_input)
-            pass_input.send_keys(cand_password)
+            
+            for char in cand_password:
+                pass_input.send_keys(char)
+                time.sleep(0.05)
+            
             driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", pass_input)
             driver.execute_script("arguments[0].dispatchEvent(new Event('change', { bubbles: true }));", pass_input)
             time.sleep(0.5)
             
             try:
                 submit_btn = driver.find_element(By.XPATH, "//button[@type='submit' or contains(., '送信') or contains(., '次へ')]")
-                driver.execute_script("arguments[0].click();", submit_btn)
+                # ★クリックメソッドを複数試行して空振りを防ぐ
+                try:
+                    submit_btn.click()
+                except Exception:
+                    driver.execute_script("arguments[0].click();", submit_btn)
             except Exception: 
                 pass_input.send_keys(Keys.RETURN)
             
             time.sleep(2)
             try:
                 email_input = WebDriverWait(driver, 10).until(
-                    EC.presence_of_element_located((By.XPATH, "//input[@type='email' or contains(@placeholder, 'メールアドレス')]"))
+                    EC.presence_of_element_located((By.XPATH, "//input[@type='email' or contains(@placeholder, 'メールアドレス') or contains(@name, 'email')]"))
                 )
                 successful_password = cand_password
                 successful_pass_msg_id = p_msg_id
-                log_flush(f"✅ パスワード認証成功: {cand_password}")
+                log_flush(f"✅ パスワード認証成功: 次の画面（メールアドレス入力）へ遷移しました")
                 break
             except Exception:
-                log_flush(f"⚠️ パスワード認証失敗: {cand_password}", logging.WARNING)
+                body_text = driver.find_element(By.TAG_NAME, "body").text.replace('\n', ' ')
+                log_flush(f"⚠️ パスワード認証失敗: 画面が遷移しませんでした。画面上のテキスト(一部): {body_text[:200]}", logging.WARNING)
 
         if not successful_password:
-            log_flush("❌ 一致するダウンロードパスワードが見つかりませんでした。", logging.ERROR)
+            log_flush("❌ 全パスワード候補で認証失敗、またはタイムアウトしました。", logging.ERROR)
             return None, None, None
 
+        # ==========================================
+        # STEP 2: メールアドレス入力と認証コード送信
+        # ==========================================
+        log_flush(f"✉️ メールアドレス入力試行: {my_email}")
         email_input.clear()
-        email_input.send_keys(my_email)
+        
+        # 確実な打鍵入力
+        for char in my_email:
+            email_input.send_keys(char)
+            time.sleep(0.02)
+            
+        driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", email_input)
+        driver.execute_script("arguments[0].dispatchEvent(new Event('change', { bubbles: true }));", email_input)
         time.sleep(1)
 
         request_timestamp = time.time()
-        send_code_btn = wait.until(EC.presence_of_element_located((By.XPATH, "//button[@type='submit' or contains(., '認証コード')]")))
-        driver.execute_script("arguments[0].click();", send_code_btn)
+        
+        log_flush("🔘 『認証コードを送信』ボタンをクリックします")
+        try:
+            send_code_btn = wait.until(EC.presence_of_element_located((By.XPATH, "//button[@type='submit' or contains(., '認証コード')]")))
+            try:
+                send_code_btn.click()
+            except Exception:
+                driver.execute_script("arguments[0].click();", send_code_btn)
+        except Exception as e:
+            log_flush(f"❌ 『認証コードを送信』ボタンが押せませんでした: {e}", logging.ERROR)
+            return None, None, None
 
-        log_flush("📧 Gmailから認証コード(6桁の数字)の受信を待機中...")
+        log_flush("⏳ Gmailから認証コード(6桁の数字)の受信を待機中...(最大約45秒)")
         auth_code, auth_msg_id = fetch_verification_code(service, request_timestamp, processed_label_id)
-        if not auth_code: raise Exception("認証コードが取得できませんでした。")
+        if not auth_code: 
+            log_flush("❌ 認証コードがGmailに届きませんでした（タイムアウト）。", logging.ERROR)
+            raise Exception("認証コードが取得できませんでした。")
+            
         log_flush(f"✅ 認証コードを受信しました: {auth_code}")
 
+        # ==========================================
+        # STEP 3: 認証コード入力とダウンロード
+        # ==========================================
         code_input = wait.until(EC.presence_of_element_located((By.XPATH, "//input[@type='text' or @type='number']")))
         code_input.clear()
-        code_input.send_keys(auth_code)
+        
+        log_flush(f"🔢 認証コードを入力します: {auth_code}")
+        for char in auth_code:
+            code_input.send_keys(char)
+            time.sleep(0.05)
+            
         time.sleep(1)
 
         verify_btn = wait.until(EC.presence_of_element_located((By.XPATH, "//button[@type='submit' or contains(., '認証')]")))
         driver.execute_script("arguments[0].click();", verify_btn)
 
+        log_flush("📥 『ダウンロード』ボタンを探してクリックします")
         download_btn = wait.until(EC.presence_of_element_located((By.XPATH, "//button[contains(., 'ダウンロード')]")))
         time.sleep(2)
         driver.execute_script("arguments[0].click();", download_btn)
@@ -532,7 +569,10 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
             latest_file = max(downloaded_files, key=os.path.getctime)
             log_flush(f"✅ ファイルダウンロード成功: {latest_file}")
             return latest_file, successful_pass_msg_id, auth_msg_id
+            
+        log_flush("❌ ダウンロードフォルダにファイルが生成されませんでした。", logging.ERROR)
         return None, None, None
+        
     except Exception as e:
         log_flush(f"HENNGEダウンロード例外発生: {e}", logging.ERROR)
         return None, None, None
