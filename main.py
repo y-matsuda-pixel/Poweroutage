@@ -455,24 +455,25 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
         # パターンA: すでに認証完了済みで「ダウンロード」ボタンが直接存在する場合（最優先判定）
         # ==========================================
         try:
-            direct_download_btn = driver.find_element(By.XPATH, "//*[contains(text(), 'ダウンロード') or contains(., 'ダウンロード')]")
-            if direct_download_btn.is_displayed():
-                log_flush("ℹ️ すでに認証済み画面が表示されています。認証ステップをスキップして直接『ダウンロード』を実行します。")
-                try: direct_download_btn.click()
-                except Exception: driver.execute_script("arguments[0].click();", direct_download_btn)
-                
-                wait_time = 0
-                while wait_time < 60:
-                    time.sleep(2)
-                    wait_time += 2
-                    files = os.listdir(DOWNLOAD_DIR)
-                    if files and not any(f.endswith('.crdownload') or f.endswith('.tmp') for f in files): break
+            direct_download_btns = driver.find_elements(By.XPATH, "//a[contains(., 'ダウンロード')] | //button[contains(., 'ダウンロード')] | //div[@role='button' and contains(., 'ダウンロード')]")
+            for btn in direct_download_btns:
+                if btn.is_displayed():
+                    log_flush("ℹ️ すでに認証済み画面が表示されています。認証ステップをスキップして直接『ダウンロード』を実行します。")
+                    try: btn.click()
+                    except Exception: driver.execute_script("arguments[0].click();", btn)
+                    
+                    wait_time = 0
+                    while wait_time < 60:
+                        time.sleep(2)
+                        wait_time += 2
+                        files = os.listdir(DOWNLOAD_DIR)
+                        if files and not any(f.endswith('.crdownload') or f.endswith('.tmp') for f in files): break
 
-                downloaded_files = glob.glob(str(DOWNLOAD_DIR / '*'))
-                if downloaded_files:
-                    latest_file = max(downloaded_files, key=os.path.getctime)
-                    log_flush(f"✅ ファイルダウンロード成功: {latest_file}")
-                    return latest_file, None, None
+                    downloaded_files = glob.glob(str(DOWNLOAD_DIR / '*'))
+                    if downloaded_files:
+                        latest_file = max(downloaded_files, key=os.path.getctime)
+                        log_flush(f"✅ ファイルダウンロード成功: {latest_file}")
+                        return latest_file, None, None
         except Exception:
             pass
 
@@ -501,27 +502,24 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
                 log_flush(f"🔑 パスワード入力試行中 ({idx + 1}/{len(password_candidates)}): {cand_password}")
                 
                 pass_input.clear()
-                driver.execute_script("arguments[0].click();", pass_input)
                 time.sleep(0.2)
                 
                 for char in cand_password:
                     pass_input.send_keys(char)
                     time.sleep(0.05)
                 
-                driver.execute_script("arguments[0].blur();", pass_input)
+                time.sleep(0.5)
+                pass_input.send_keys(Keys.RETURN)
                 time.sleep(0.5)
                 
                 try:
                     btns = driver.find_elements(By.XPATH, "//button[@type='submit' or contains(., '送信') or contains(., '次へ')] | //input[@type='submit']")
-                    if btns:
-                        try:
-                            btns[0].click()
-                        except Exception:
-                            driver.execute_script("arguments[0].click();", btns[0])
-                    else:
-                        pass_input.send_keys(Keys.RETURN)
+                    for b in btns:
+                        if b.is_displayed() and b.is_enabled():
+                            driver.execute_script("arguments[0].click();", b)
+                            break
                 except Exception:
-                    pass_input.send_keys(Keys.RETURN)
+                    pass
                 
                 time.sleep(2)
                 try:
@@ -548,7 +546,7 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
 
         log_flush(f"✉️ メールアドレス入力試行: {my_email}")
         email_input.clear()
-        driver.execute_script("arguments[0].click();", email_input)
+        driver.execute_script("arguments[0].focus();", email_input)
         time.sleep(0.2)
         
         for char in my_email:
@@ -591,31 +589,30 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
             code_input.send_keys(char)
             time.sleep(0.05)
             
-        driver.execute_script("arguments[0].blur();", code_input)
         time.sleep(1)
 
         log_flush("🔘 認証実行ボタンをクリックします")
         try:
-            verify_btn = wait.until(EC.presence_of_element_located((By.XPATH, "//button[@type='submit' or contains(., '認証') or contains(., '次へ')]")))
+            verify_btn = wait.until(EC.presence_of_element_located((By.XPATH, "//button[@type='submit' or contains(., '認証')]")))
             try: verify_btn.click()
             except Exception: driver.execute_script("arguments[0].click();", verify_btn)
         except Exception:
             code_input.send_keys(Keys.RETURN)
 
         log_flush("📥 『ダウンロード』ボタンを探してクリックします")
-        # ★タグを限定せず「ダウンロード」のテキストを持つ可視要素を広く検索・待機
         try:
-            download_btn = WebDriverWait(driver, 15).until(
-                EC.element_to_be_clickable((By.XPATH, "//*[contains(text(), 'ダウンロード') or contains(., 'ダウンロード')]"))
+            # ★【最重要修正】aタグとbuttonタグを両方対象にして確実に要素を取得する
+            download_btn = WebDriverWait(driver, 20).until(
+                EC.presence_of_element_located((By.XPATH, "//a[contains(., 'ダウンロード')] | //button[contains(., 'ダウンロード')] | //div[@role='button' and contains(., 'ダウンロード')]"))
             )
-            time.sleep(1)
+            time.sleep(2)
             try:
                 download_btn.click()
             except Exception:
                 driver.execute_script("arguments[0].click();", download_btn)
         except Exception as e:
-            body_text = driver.find_element(By.TAG_NAME, "body").text.replace('\n', ' ')[:200]
-            log_flush(f"❌ ダウンロードボタンの検出/クリックに失敗しました: {e} (画面表示: {body_text})", logging.ERROR)
+            body_text = driver.find_element(By.TAG_NAME, "body").text.replace('\n', ' ')[:500]
+            log_flush(f"❌ ダウンロードボタンの検出に失敗しました: {e} (画面表示: {body_text})", logging.ERROR)
             return None, None, None
 
         wait_time = 0
