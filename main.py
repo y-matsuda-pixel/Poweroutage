@@ -452,33 +452,7 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
             return None, None, None
 
         # ==========================================
-        # パターンA: すでに認証完了済み画面の場合
-        # ==========================================
-        try:
-            direct_download_btns = driver.find_elements(By.XPATH, "//button[contains(@aria-label, 'ダウンロード')] | //button[contains(., 'ダウンロード')] | //a[contains(., 'ダウンロード')]")
-            for btn in direct_download_btns:
-                if btn.is_displayed():
-                    log_flush("ℹ️ すでに認証済み画面が表示されています。直接『ダウンロード』を実行します。")
-                    try: btn.click()
-                    except Exception: driver.execute_script("arguments[0].click();", btn)
-                    
-                    wait_time = 0
-                    while wait_time < 60:
-                        time.sleep(2)
-                        wait_time += 2
-                        files = os.listdir(DOWNLOAD_DIR)
-                        if files and not any(f.endswith('.crdownload') or f.endswith('.tmp') for f in files): break
-
-                    downloaded_files = glob.glob(str(DOWNLOAD_DIR / '*'))
-                    if downloaded_files:
-                        latest_file = max(downloaded_files, key=os.path.getctime)
-                        log_flush(f"✅ ファイルダウンロード成功: {latest_file}")
-                        return latest_file, None, None
-        except Exception:
-            pass
-
-        # ==========================================
-        # STEP 1: パスワード入力
+        # STEP 1: パスワード入力（すでにステップ2の場合はスキップ）
         # ==========================================
         email_input = None
         try:
@@ -576,7 +550,7 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
         log_flush(f"✅ 認証コードを受信しました: {auth_code}")
 
         # ==========================================
-        # STEP 3: 認証コード入力と送信 (ここを最新版の強力仕様に置き換えました)
+        # STEP 3: 認証コード入力と送信 (強効化処理)
         # ==========================================
         code_input = wait.until(EC.presence_of_element_located((By.XPATH, "//input[@type='text' or @type='number' or contains(@placeholder, 'コード')]")))
         code_input.clear()
@@ -587,11 +561,14 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
             code_input.send_keys(char)
             time.sleep(0.05)
             
-        driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", code_input)
-        driver.execute_script("arguments[0].dispatchEvent(new Event('change', { bubbles: true }));", code_input)
+        # React側へ変更通知を送信
+        driver.execute_script("""
+            arguments[0].dispatchEvent(new Event('input', { bubbles: true }));
+            arguments[0].dispatchEvent(new Event('change', { bubbles: true }));
+        """, code_input)
         time.sleep(0.5)
 
-        log_flush("🔘 認証実行ボタンをクリックします")
+        log_flush("🔘 認証実行（フォーム送信）を行います")
         try:
             verify_btns = driver.find_elements(By.XPATH, "//button[@type='submit' or contains(., '認証') or contains(., '次へ') or contains(., '確認')] | //input[@type='submit']")
             for v_btn in verify_btns:
@@ -604,18 +581,17 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
         code_input.send_keys(Keys.RETURN)
         
         log_flush("⏳ 画面遷移（ファイル受信画面）を待機しています...")
-        time.sleep(4)
+        time.sleep(5)
 
         # ==========================================
-        # STEP 4: ダウンロードボタンの強力な探索とクリック
+        # STEP 4: ダウンロードボタンの全自動探索
         # ==========================================
         log_flush("📥 『ダウンロード』ボタンを探してクリックします")
         
-        # JavaScriptで画面上の全要素を走査し、「ダウンロード」を含むボタンを強制クリック
         download_clicked = False
         for attempt in range(10): # 2秒おきに10回試行 (計20秒待機)
             download_clicked = driver.execute_script("""
-                const els = document.querySelectorAll('button, a, span, div');
+                const els = document.querySelectorAll('button, a, div[role="button"], span');
                 for (let el of els) {
                     const txt = el.innerText || '';
                     const label = el.getAttribute('aria-label') || '';
@@ -633,10 +609,10 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
 
         if not download_clicked:
             body_text = driver.find_element(By.TAG_NAME, "body").text.replace('\n', ' ')[:400]
-            log_flush(f"❌ 20秒待機しましたが、ダウンロードボタンが発見できませんでした。画面表示: {body_text}", logging.ERROR)
+            log_flush(f"❌ ダウンロードボタンが発見できませんでした。画面表示: {body_text}", logging.ERROR)
             return None, None, None
 
-        # ダウンロードファイルの生成を待機
+        # ファイル生成を待機
         wait_time = 0
         while wait_time < 60:
             time.sleep(2)
