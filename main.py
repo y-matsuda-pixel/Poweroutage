@@ -1,3 +1,8 @@
+import sys
+print("==========================================", flush=True)
+print("=== PERFECT_CODE_VERSION_20260916_FINAL ===", flush=True)
+print("==========================================", flush=True)
+
 # coding: utf-8
 
 import pandas as pd
@@ -15,7 +20,6 @@ import shutil
 import datetime
 from datetime import timezone, timedelta
 import logging
-import sys
 import requests
 from pathlib import Path
 import re
@@ -73,7 +77,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(LOG_DIR / log_filename, encoding='utf-8'),
+        logging.FileHandler(LOG_DIR / log_filename, encoding='utf-8'), 
         logging.StreamHandler(sys.stdout)
     ]
 )
@@ -550,7 +554,7 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
         log_flush(f"✅ 認証コードを受信しました: {auth_code}")
 
         # ==========================================
-        # STEP 3: 認証コード入力と確実な送信処理
+        # STEP 3: 認証コード入力と【4段構えの完全クリック・送信】処理
         # ==========================================
         code_input = wait.until(EC.presence_of_element_located((By.XPATH, "//input[@type='text' or @type='number' or contains(@placeholder, 'コード') or contains(@name, 'code')]")))
         code_input.clear()
@@ -558,10 +562,12 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
         log_flush(f"🔢 認証コードを入力します: {auth_code}")
         driver.execute_script("arguments[0].focus();", code_input)
         
+        # 1. 人間のように1文字ずつ確実に入力
         for char in auth_code:
             code_input.send_keys(char)
             time.sleep(0.05)
             
+        # 2. Reactの内部状態を更新させるためJavaScriptイベントを強制発火
         driver.execute_script("""
             var el = arguments[0];
             el.dispatchEvent(new Event('input', { bubbles: true }));
@@ -570,23 +576,38 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
         """, code_input)
         time.sleep(1)
 
-        log_flush("🔘 認証実行（フォーム送信）を行います")
+        log_flush("🔘 『認証』ボタンを探してクリックします")
         
-        submitted = driver.execute_script("""
-            const btns = document.querySelectorAll('button, input[type="submit"], a');
-            for (let btn of btns) {
-                const txt = btn.innerText || btn.value || '';
-                if (txt.includes('認証') || txt.includes('送信') || txt.includes('確認') || txt.includes('次へ') || btn.type === 'submit') {
-                    btn.removeAttribute('disabled');
-                    btn.click();
-                    return true;
-                }
-            }
-            return false;
-        """)
-        
-        if not submitted:
+        # 3. Seleniumによるクリックと、JavaScriptによるクリックを同時に行う
+        clicked = False
+        try:
+            verify_btns = driver.find_elements(By.XPATH, "//button[@type='submit' or contains(., '認証') or contains(., '送信') or contains(., '次へ')] | //input[@type='submit']")
+            for v_btn in verify_btns:
+                driver.execute_script("arguments[0].removeAttribute('disabled');", v_btn)
+                try:
+                    v_btn.click()
+                    clicked = True
+                    break
+                except Exception:
+                    driver.execute_script("arguments[0].click();", v_btn)
+                    clicked = True
+                    break
+        except Exception:
+            pass
+
+        # 4. ボタンが見つからなかった場合、Enterキーを押す
+        if not clicked:
             code_input.send_keys(Keys.RETURN)
+
+        # 5. さらに念押しでフォーム全体を強制送信
+        driver.execute_script("""
+            const input = arguments[0];
+            const form = input.closest('form');
+            if (form) {
+                if (form.requestSubmit) { form.requestSubmit(); } 
+                else { form.submit(); }
+            }
+        """, code_input)
 
         log_flush("⏳ 画面遷移（ファイル受信画面）を待機しています...")
         time.sleep(5)
@@ -925,7 +946,6 @@ def create_output_csv(extracted_data, stop_count, recovery_count):
 
 # --- メイン処理 ---
 if __name__ == '__main__':
-    log_flush("=== VERSION_CHECK_555 ===")
     log_flush("=== 自動処理を開始します ===")
     gmail_service = get_gmail_service()
     processed_label_id = get_or_create_processed_label_id(gmail_service, "処理済み")
