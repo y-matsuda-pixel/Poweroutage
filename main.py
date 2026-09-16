@@ -310,6 +310,7 @@ def add_processed_label(service, msg_ids, label_id):
     if not valid_ids: return
     try:
         service.users().messages().batchModify(userId='me', body={'ids': valid_ids, 'addLabelIds': [label_id]}).execute()
+        logging.info(f"🏷️ 処理済みラベルを付与しました (対象: {len(valid_ids)}件)")
     except Exception as e: logging.warning(f"ラベル付与失敗: {e}")
 
 def get_email_body(payload):
@@ -380,15 +381,13 @@ def fetch_hennge_details(service, processed_label_id):
 
             clean_body_pass = re.sub(r'<[^>]+>', ' ', get_email_body(msg['payload'])).replace('\r\n', ' ').replace('\n', ' ')
             
-            # ★12桁の英数記号をピンポイントで確実に抽出する正規表現パターン
+            # ★【重要修正】直後の改行や空白を除いた「最初の12文字」を正確に抽出するパターン
             patterns = [
-                r'(?:ファイルダウンロードパスワード|ファイルパスワード|ダウンロードパスワード|パスワード|Password)[:：\s\n]+([^\s\u3000-\u9fff\u3040-\u30ff]{12})',
-                r'(?:ファイルダウンロードパスワード|ファイルパスワード|ダウンロードパスワード|パスワード|Password)[:：\s\n]+([\x21-\x7e]{12})'
+                r'(?:ファイルダウンロードパスワード|ファイルパスワード|ダウンロードパスワード|パスワード|Password)[:：\s\n]+([^\s\u3000-\u9fff\u3040-\u30ff]{12})'
             ]
             for pat in patterns:
                 for match_item in re.finditer(pat, clean_body_pass, re.IGNORECASE):
                     c_val = match_item.group(1).strip().strip('。、.）」】 \t\r\n')
-                    # 記号を含めASCII範囲内の文字であり、ぴったり12桁であることを確認
                     if len(c_val) == 12 and c_val.isascii():
                         if not any(w in c_val.lower() for w in ["password", "japanese", "english", "hennge", "transfer", "http", "https"]):
                             candidates.append((time_diff, c_val, headers.get('subject', ''), headers.get('date', ''), m['id'], time_diff))
