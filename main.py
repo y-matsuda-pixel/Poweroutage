@@ -335,9 +335,12 @@ def fetch_hennge_details(service, processed_label_id):
     url_msg_id, url_msg_timestamp, url_from, url_thread_id, target_region = None, 0, "", "", None
     logging.info("Gmail APIに接続し、対象メールを検索中...")
     try:
-        results_url = service.users().messages().list(userId='me', q='label:電力停止 停止 -label:処理済み', maxResults=50).execute()
+        search_query = 'label:電力停止 停止 -label:処理済み'
+        results_url = service.users().messages().list(userId='me', q=search_query, maxResults=50).execute()
         messages_url = results_url.get('messages', [])
         
+        logging.info(f"🔍 未処理メール検索件数: {len(messages_url)}件")
+
         for m in messages_url:
             msg = service.users().messages().get(userId='me', id=m['id']).execute()
             headers = {h['name'].lower(): h['value'] for h in msg['payload'].get('headers', [])}
@@ -349,7 +352,8 @@ def fetch_hennge_details(service, processed_label_id):
             url_match = re.search(r'(https://[a-zA-Z0-9.-]*transfer\.hennge\.com/[^\s"\'<>]+)', clean_body)
 
             if url_match and not url:
-                url = url_match.group(1).rstrip('。、.）」】)\] \t\r\n').rstrip('.')
+                raw_extracted_url = url_match.group(1)
+                url = raw_extracted_url.rstrip('。、.）」】)\] \t\r\n').rstrip('.')
                 url_msg_id = m['id']
                 url_thread_id = msg.get('threadId', '')
                 url_from = headers.get('from', '')
@@ -357,13 +361,13 @@ def fetch_hennge_details(service, processed_label_id):
                 url_msg_timestamp = int(msg.get('internalDate', 0)) / 1000
                 if "関西" in subject_text: target_region = "関西"
                 elif "関東" in subject_text: target_region = "関東"
+                logging.info(f"📧 対象メール発見 - 件名: {subj}")
+                logging.info(f"🔗 抽出したHENNGE URL: {url}")
                 break
 
         if not url:
-            logging.info("対象のHENNGE URLを含む未処理メールが見つかりませんでした。")
+            logging.info("❌ 対象のHENNGE URLを含む未処理メールが見つかりませんでした。")
             return None, [], "", None
-
-        logging.info(f"🔗 対象URLを発見: {url}")
 
         url_dt = datetime.datetime.fromtimestamp(url_msg_timestamp)
         after_date = url_dt.strftime('%Y/%m/%d')
@@ -381,7 +385,6 @@ def fetch_hennge_details(service, processed_label_id):
 
             clean_body_pass = re.sub(r'<[^>]+>', ' ', get_email_body(msg['payload'])).replace('\r\n', ' ').replace('\n', ' ')
             
-            # ★【重要修正】直後の改行や空白を除いた「最初の12文字」を正確に抽出するパターン
             patterns = [
                 r'(?:ファイルダウンロードパスワード|ファイルパスワード|ダウンロードパスワード|パスワード|Password)[:：\s\n]+([^\s\u3000-\u9fff\u3040-\u30ff]{12})'
             ]
@@ -400,7 +403,7 @@ def fetch_hennge_details(service, processed_label_id):
                 seen_pw.add(c_item[1])
                 unique_candidates.append(c_item)
 
-        logging.info(f"🔑 パスワード候補を抽出しました ({len(unique_candidates)}件): {[c[1] for c in unique_candidates]}")
+        logging.info(f"🔑 抽出したパスワード候補 ({len(unique_candidates)}件): {[c[1] for c in unique_candidates]}")
         return url, unique_candidates, subject_text, url_msg_id
 
     except Exception as e:
@@ -422,7 +425,7 @@ def fetch_verification_code(service, start_timestamp, processed_label_id):
     return None, None
 
 def download_from_hennge(url, password_candidates, service, processed_label_id):
-    logging.info(f"HENNGEからファイルのダウンロードを開始します URL: {url}")
+    logging.info(f"🌐 HENNGEへアクセス開始 - Target URL: {url}")
     my_email = service.users().getProfile(userId='me').execute().get('emailAddress', '')
     
     for f in glob.glob(str(DOWNLOAD_DIR / '*')): 
@@ -437,11 +440,21 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
         driver.get(url)
         time.sleep(3)
 
-        pass_input = wait.until(EC.presence_of_element_located((By.XPATH, "//input[@type='password']")))
+        page_source = driver.page_source
+        if "存在しません" in page_source or "見つかりません" in page_source or "Expired" in page_source or "拒否され" in page_source:
+            logging.error(f"❌ 画面エラー検知（アクセス拒否/リンク切れ/有効期限切れ） - URL: {url}")
+            return None, None, None
+
+        try:
+            pass_input = wait.until(EC.presence_of_element_located((By.XPATH, "//input[@type='password']")))
+        except Exception:
+            logging.error(f"❌ パスワード入力欄が見つかりません。現在のページタイトル: {driver.title}")
+            return None, None, None
+
         successful_password, successful_pass_msg_id = None, None
 
         for idx, (score, cand_password, p_subj, p_date, p_msg_id, t_diff) in enumerate(password_candidates):
-            logging.info(f"🔑 パスワード試行中 ({idx + 1}/{len(password_candidates)}): {cand_password}")
+            logging.info(f"🔑 パスワード入力試行中 ({idx + 1}/{len(password_candidates)}): {cand_password}")
             pass_input.clear()
             pass_input.send_keys(cand_password)
             time.sleep(0.5)
@@ -460,10 +473,10 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
                 logging.info(f"✅ パスワード認証成功: {cand_password}")
                 break
             except Exception:
-                logging.warning(f"パスワード認証失敗: {cand_password}")
+                logging.warning(f"⚠️ パスワード認証失敗: {cand_password}")
 
         if not successful_password:
-            logging.error("一致するダウンロードパスワードが見つかりませんでした。")
+            logging.error("❌ 一致するダウンロードパスワードが見つかりませんでした。")
             return None, None, None
 
         email_input.clear()
@@ -474,7 +487,7 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
         send_code_btn = wait.until(EC.presence_of_element_located((By.XPATH, "//button[@type='submit' or contains(., '認証コード')]")))
         driver.execute_script("arguments[0].click();", send_code_btn)
 
-        logging.info("📧 Gmailから認証コードの受信を待機中...")
+        logging.info("📧 Gmailから認証コード(6桁の数字)の受信を待機中...")
         auth_code, auth_msg_id = fetch_verification_code(service, request_timestamp, processed_label_id)
         if not auth_code: raise Exception("認証コードが取得できませんでした。")
         logging.info(f"✅ 認証コードを受信しました: {auth_code}")
@@ -501,11 +514,11 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
         downloaded_files = glob.glob(str(DOWNLOAD_DIR / '*'))
         if downloaded_files:
             latest_file = max(downloaded_files, key=os.path.getctime)
-            logging.info(f"✅ ダウンロード完了: {latest_file}")
+            logging.info(f"✅ ファイルダウンロード成功: {latest_file}")
             return latest_file, successful_pass_msg_id, auth_msg_id
         return None, None, None
     except Exception as e:
-        logging.error(f"HENNGEダウンロード例外: {e}", exc_info=True)
+        logging.error(f"HENNGEダウンロード例外発生: {e}", exc_info=True)
         return None, None, None
     finally:
         if driver: driver.quit()
