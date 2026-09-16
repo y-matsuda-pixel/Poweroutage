@@ -43,8 +43,11 @@ jobs:
           LARK_WIKI_TOKEN: ${{ secrets.LARK_WIKI_TOKEN }}
           DEFAULT_SHEET_ID: ${{ secrets.DEFAULT_SHEET_ID }}
         run: |
-          echo "=== Git Commit Info ==="
-          git log -1 --oneline
-          echo "=== main.py Head Check ==="
-          head -n 25 main.py
+          echo "=== YAML直接出力: バージョン強制確認 ==="
+          echo "=== Githubの記憶を消去し、最新コードを強制取得します ==="
+          git fetch origin main
+          git reset --hard origin/main
+          echo "=== 取得した main.py の冒頭を確認 ==="
+          head -n 20 main.py
+          echo "=== プログラム実行開始 ==="
           python main.py
