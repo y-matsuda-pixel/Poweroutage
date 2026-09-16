@@ -455,10 +455,11 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
         # パターンA: すでに認証完了済みで「ダウンロード」ボタンが直接存在する場合（最優先判定）
         # ==========================================
         try:
-            direct_download_btn = driver.find_element(By.XPATH, "//button[contains(., 'ダウンロード')]")
+            direct_download_btn = driver.find_element(By.XPATH, "//*[contains(text(), 'ダウンロード') or contains(., 'ダウンロード')]")
             if direct_download_btn.is_displayed():
                 log_flush("ℹ️ すでに認証済み画面が表示されています。認証ステップをスキップして直接『ダウンロード』を実行します。")
-                driver.execute_script("arguments[0].click();", direct_download_btn)
+                try: direct_download_btn.click()
+                except Exception: driver.execute_script("arguments[0].click();", direct_download_btn)
                 
                 wait_time = 0
                 while wait_time < 60:
@@ -590,15 +591,32 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
             code_input.send_keys(char)
             time.sleep(0.05)
             
+        driver.execute_script("arguments[0].blur();", code_input)
         time.sleep(1)
 
-        verify_btn = wait.until(EC.presence_of_element_located((By.XPATH, "//button[@type='submit' or contains(., '認証')]")))
-        driver.execute_script("arguments[0].click();", verify_btn)
+        log_flush("🔘 認証実行ボタンをクリックします")
+        try:
+            verify_btn = wait.until(EC.presence_of_element_located((By.XPATH, "//button[@type='submit' or contains(., '認証') or contains(., '次へ')]")))
+            try: verify_btn.click()
+            except Exception: driver.execute_script("arguments[0].click();", verify_btn)
+        except Exception:
+            code_input.send_keys(Keys.RETURN)
 
         log_flush("📥 『ダウンロード』ボタンを探してクリックします")
-        download_btn = wait.until(EC.presence_of_element_located((By.XPATH, "//button[contains(., 'ダウンロード')]")))
-        time.sleep(2)
-        driver.execute_script("arguments[0].click();", download_btn)
+        # ★タグを限定せず「ダウンロード」のテキストを持つ可視要素を広く検索・待機
+        try:
+            download_btn = WebDriverWait(driver, 15).until(
+                EC.element_to_be_clickable((By.XPATH, "//*[contains(text(), 'ダウンロード') or contains(., 'ダウンロード')]"))
+            )
+            time.sleep(1)
+            try:
+                download_btn.click()
+            except Exception:
+                driver.execute_script("arguments[0].click();", download_btn)
+        except Exception as e:
+            body_text = driver.find_element(By.TAG_NAME, "body").text.replace('\n', ' ')[:200]
+            log_flush(f"❌ ダウンロードボタンの検出/クリックに失敗しました: {e} (画面表示: {body_text})", logging.ERROR)
+            return None, None, None
 
         wait_time = 0
         while wait_time < 60:
