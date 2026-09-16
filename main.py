@@ -452,6 +452,30 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
             return None, None, None
 
         # ==========================================
+        # パターンA: すでに認証完了済みで「ダウンロード」ボタンが直接存在する場合（最優先判定）
+        # ==========================================
+        try:
+            direct_download_btn = driver.find_element(By.XPATH, "//button[contains(., 'ダウンロード')]")
+            if direct_download_btn.is_displayed():
+                log_flush("ℹ️ すでに認証済み画面が表示されています。認証ステップをスキップして直接『ダウンロード』を実行します。")
+                driver.execute_script("arguments[0].click();", direct_download_btn)
+                
+                wait_time = 0
+                while wait_time < 60:
+                    time.sleep(2)
+                    wait_time += 2
+                    files = os.listdir(DOWNLOAD_DIR)
+                    if files and not any(f.endswith('.crdownload') or f.endswith('.tmp') for f in files): break
+
+                downloaded_files = glob.glob(str(DOWNLOAD_DIR / '*'))
+                if downloaded_files:
+                    latest_file = max(downloaded_files, key=os.path.getctime)
+                    log_flush(f"✅ ファイルダウンロード成功: {latest_file}")
+                    return latest_file, None, None
+        except Exception:
+            pass
+
+        # ==========================================
         # STEP 1: パスワード入力（すでにステップ2の場合はスキップ）
         # ==========================================
         email_input = None
@@ -475,32 +499,25 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
             for idx, (score, cand_password, p_subj, p_date, p_msg_id, t_diff) in enumerate(password_candidates):
                 log_flush(f"🔑 パスワード入力試行中 ({idx + 1}/{len(password_candidates)}): {cand_password}")
                 
-                # ★JavaScriptのイベントを回避して確実にフォームを送信させる処理
                 pass_input.clear()
                 driver.execute_script("arguments[0].click();", pass_input)
                 time.sleep(0.2)
                 
-                # 1文字ずつキーボード入力をシミュレート
                 for char in cand_password:
                     pass_input.send_keys(char)
                     time.sleep(0.05)
                 
-                # フォーカスを外すことでVue等のバリデーション（ボタン有効化）を発火
                 driver.execute_script("arguments[0].blur();", pass_input)
                 time.sleep(0.5)
                 
-                # 送信ボタンを色々な方法でクリック試行
                 try:
                     btns = driver.find_elements(By.XPATH, "//button[@type='submit' or contains(., '送信') or contains(., '次へ')] | //input[@type='submit']")
                     if btns:
-                        # まず通常のクリック
                         try:
                             btns[0].click()
                         except Exception:
-                            # 駄目ならJSクリック
                             driver.execute_script("arguments[0].click();", btns[0])
                     else:
-                        # ボタンがない場合はEnter
                         pass_input.send_keys(Keys.RETURN)
                 except Exception:
                     pass_input.send_keys(Keys.RETURN)
