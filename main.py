@@ -451,75 +451,101 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
             log_flush(f"❌ 画面エラー検知（アクセス拒否/リンク切れ/有効期限切れ）", logging.ERROR)
             return None, None, None
 
+        # ==========================================
+        # STEP 1: パスワード入力（すでにステップ2の場合はスキップ）
+        # ==========================================
+        email_input = None
+        
         try:
-            pass_input = wait.until(EC.presence_of_element_located((By.XPATH, "//input[@type='password']")))
+            email_input = driver.find_element(By.XPATH, "//input[@type='email' or contains(@placeholder, 'メールアドレス') or contains(@name, 'email')]")
+            log_flush("ℹ️ すでにステップ2（メールアドレス入力画面）が表示されています。パスワード入力をスキップします。")
         except Exception:
-            log_flush(f"❌ パスワード入力欄が見つかりません。現在のページタイトル: {driver.title}", logging.ERROR)
-            return None, None, None
+            pass
 
-        successful_password, successful_pass_msg_id = None, None
-
-        for idx, (score, cand_password, p_subj, p_date, p_msg_id, t_diff) in enumerate(password_candidates):
-            log_flush(f"🔑 パスワード入力試行中 ({idx + 1}/{len(password_candidates)}): {cand_password}")
-            
-            pass_input.clear()
-            driver.execute_script("arguments[0].focus();", pass_input)
-            
-            for char in cand_password:
-                pass_input.send_keys(char)
-                time.sleep(0.05)
-            
-            driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", pass_input)
-            driver.execute_script("arguments[0].dispatchEvent(new Event('change', { bubbles: true }));", pass_input)
-            time.sleep(0.5)
-            
+        if not email_input:
             try:
-                submit_btn = driver.find_element(By.XPATH, "//button[@type='submit' or contains(., '送信') or contains(., '次へ')]")
-                # ★クリックメソッドを複数試行して空振りを防ぐ
-                try:
-                    submit_btn.click()
-                except Exception:
-                    driver.execute_script("arguments[0].click();", submit_btn)
-            except Exception: 
-                pass_input.send_keys(Keys.RETURN)
-            
-            time.sleep(2)
-            try:
-                email_input = WebDriverWait(driver, 10).until(
-                    EC.presence_of_element_located((By.XPATH, "//input[@type='email' or contains(@placeholder, 'メールアドレス') or contains(@name, 'email')]"))
-                )
-                successful_password = cand_password
-                successful_pass_msg_id = p_msg_id
-                log_flush(f"✅ パスワード認証成功: 次の画面（メールアドレス入力）へ遷移しました")
-                break
+                pass_input = wait.until(EC.presence_of_element_located((By.XPATH, "//input[@type='password']")))
             except Exception:
-                body_text = driver.find_element(By.TAG_NAME, "body").text.replace('\n', ' ')
-                log_flush(f"⚠️ パスワード認証失敗: 画面が遷移しませんでした。画面上のテキスト(一部): {body_text[:200]}", logging.WARNING)
+                body_text = driver.find_element(By.TAG_NAME, "body").text.replace('\n', ' ')[:200]
+                log_flush(f"❌ パスワード入力欄が見つかりません。画面表示: {body_text}", logging.ERROR)
+                return None, None, None
 
-        if not successful_password:
-            log_flush("❌ 全パスワード候補で認証失敗、またはタイムアウトしました。", logging.ERROR)
-            return None, None, None
+            successful_password, successful_pass_msg_id = None, None
+
+            for idx, (score, cand_password, p_subj, p_date, p_msg_id, t_diff) in enumerate(password_candidates):
+                log_flush(f"🔑 パスワード入力試行中 ({idx + 1}/{len(password_candidates)}): {cand_password}")
+                
+                # ★JavaScriptのイベントを回避して確実にフォームを送信させる処理
+                pass_input.clear()
+                driver.execute_script("arguments[0].click();", pass_input)
+                time.sleep(0.2)
+                
+                # 1文字ずつキーボード入力をシミュレート
+                for char in cand_password:
+                    pass_input.send_keys(char)
+                    time.sleep(0.05)
+                
+                # フォーカスを外すことでVue等のバリデーション（ボタン有効化）を発火
+                driver.execute_script("arguments[0].blur();", pass_input)
+                time.sleep(0.5)
+                
+                # 送信ボタンを色々な方法でクリック試行
+                try:
+                    btns = driver.find_elements(By.XPATH, "//button[@type='submit' or contains(., '送信') or contains(., '次へ')] | //input[@type='submit']")
+                    if btns:
+                        # まず通常のクリック
+                        try:
+                            btns[0].click()
+                        except Exception:
+                            # 駄目ならJSクリック
+                            driver.execute_script("arguments[0].click();", btns[0])
+                    else:
+                        # ボタンがない場合はEnter
+                        pass_input.send_keys(Keys.RETURN)
+                except Exception:
+                    pass_input.send_keys(Keys.RETURN)
+                
+                time.sleep(2)
+                try:
+                    email_input = WebDriverWait(driver, 8).until(
+                        EC.presence_of_element_located((By.XPATH, "//input[@type='email' or contains(@placeholder, 'メールアドレス') or contains(@name, 'email')]"))
+                    )
+                    successful_password = cand_password
+                    successful_pass_msg_id = p_msg_id
+                    log_flush(f"✅ パスワード認証成功: 次の画面（メールアドレス入力）へ遷移しました")
+                    break
+                except Exception:
+                    body_text = driver.find_element(By.TAG_NAME, "body").text.replace('\n', ' ')
+                    log_flush(f"⚠️ パスワード認証失敗: 画面が遷移しませんでした。画面上のテキスト(一部): {body_text[:300]}", logging.WARNING)
+
+            if not successful_password and not email_input:
+                log_flush("❌ 全パスワード候補で認証失敗、またはタイムアウトしました。", logging.ERROR)
+                return None, None, None
 
         # ==========================================
         # STEP 2: メールアドレス入力と認証コード送信
         # ==========================================
+        if not email_input:
+            email_input = wait.until(EC.presence_of_element_located((By.XPATH, "//input[@type='email' or contains(@placeholder, 'メールアドレス') or contains(@name, 'email')]")))
+
         log_flush(f"✉️ メールアドレス入力試行: {my_email}")
         email_input.clear()
+        driver.execute_script("arguments[0].click();", email_input)
+        time.sleep(0.2)
         
-        # 確実な打鍵入力
         for char in my_email:
             email_input.send_keys(char)
             time.sleep(0.02)
             
-        driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", email_input)
-        driver.execute_script("arguments[0].dispatchEvent(new Event('change', { bubbles: true }));", email_input)
-        time.sleep(1)
+        driver.execute_script("arguments[0].blur();", email_input)
+        time.sleep(0.5)
 
         request_timestamp = time.time()
         
         log_flush("🔘 『認証コードを送信』ボタンをクリックします")
         try:
             send_code_btn = wait.until(EC.presence_of_element_located((By.XPATH, "//button[@type='submit' or contains(., '認証コード')]")))
+            driver.execute_script("arguments[0].removeAttribute('disabled');", send_code_btn)
             try:
                 send_code_btn.click()
             except Exception:
