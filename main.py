@@ -332,9 +332,12 @@ def get_email_body(payload):
 def fetch_hennge_details(service, processed_label_id):
     url, subject_text = None, ""
     url_msg_id, url_msg_timestamp, url_from, url_thread_id, target_region = None, 0, "", "", None
+    logging.info("Gmail APIに接続し、対象メールを検索中...")
     try:
         results_url = service.users().messages().list(userId='me', q='label:電力停止 停止 -label:処理済み', maxResults=50).execute()
-        for m in results_url.get('messages', []):
+        messages_url = results_url.get('messages', [])
+        
+        for m in messages_url:
             msg = service.users().messages().get(userId='me', id=m['id']).execute()
             headers = {h['name'].lower(): h['value'] for h in msg['payload'].get('headers', [])}
             subj = headers.get('subject', '')
@@ -355,7 +358,11 @@ def fetch_hennge_details(service, processed_label_id):
                 elif "関東" in subject_text: target_region = "関東"
                 break
 
-        if not url: return None, [], "", None
+        if not url:
+            logging.info("対象のHENNGE URLを含む未処理メールが見つかりませんでした。")
+            return None, [], "", None
+
+        logging.info(f"🔗 対象URLを発見: {url}")
 
         url_dt = datetime.datetime.fromtimestamp(url_msg_timestamp)
         after_date = url_dt.strftime('%Y/%m/%d')
@@ -372,15 +379,19 @@ def fetch_hennge_details(service, processed_label_id):
             if time_diff > 7200 and m['id'] != url_msg_id: continue
 
             clean_body_pass = re.sub(r'<[^>]+>', ' ', get_email_body(msg['payload'])).replace('\r\n', ' ').replace('\n', ' ')
+            
+            # ★12桁の英数記号をピンポイントで確実に抽出する正規表現パターン
             patterns = [
-                r'(?:ファイルダウンロードパスワード|ファイルパスワード|ダウンロードパスワード|パスワード|Password)[:：\s\n]+([a-zA-Z0-9=!@#$%^&*()_+\-=\[\]{};:\'",.<>/?`]{12,32})',
-                r'(?:ファイルダウンロードパスワード|ファイルパスワード|ダウンロードパスワード|パスワード|Password)[:：\s\n]+([\x21-\x7e]{12,32})'
+                r'(?:ファイルダウンロードパスワード|ファイルパスワード|ダウンロードパスワード|パスワード|Password)[:：\s\n]+([^\s\u3000-\u9fff\u3040-\u30ff]{12})',
+                r'(?:ファイルダウンロードパスワード|ファイルパスワード|ダウンロードパスワード|パスワード|Password)[:：\s\n]+([\x21-\x7e]{12})'
             ]
             for pat in patterns:
                 for match_item in re.finditer(pat, clean_body_pass, re.IGNORECASE):
                     c_val = match_item.group(1).strip().strip('。、.）」】 \t\r\n')
+                    # 記号を含めASCII範囲内の文字であり、ぴったり12桁であることを確認
                     if len(c_val) == 12 and c_val.isascii():
-                        candidates.append((time_diff, c_val, headers.get('subject', ''), headers.get('date', ''), m['id'], time_diff))
+                        if not any(w in c_val.lower() for w in ["password", "japanese", "english", "hennge", "transfer", "http", "https"]):
+                            candidates.append((time_diff, c_val, headers.get('subject', ''), headers.get('date', ''), m['id'], time_diff))
 
         candidates.sort(key=lambda x: x[0])
         unique_candidates = []
@@ -390,9 +401,11 @@ def fetch_hennge_details(service, processed_label_id):
                 seen_pw.add(c_item[1])
                 unique_candidates.append(c_item)
 
+        logging.info(f"🔑 パスワード候補を抽出しました ({len(unique_candidates)}件): {[c[1] for c in unique_candidates]}")
         return url, unique_candidates, subject_text, url_msg_id
+
     except Exception as e:
-        logging.error(f"Gmail API 取得エラー: {e}")
+        logging.error(f"Gmail API 取得エラー: {e}", exc_info=True)
         return None, [], "", None
 
 def fetch_verification_code(service, start_timestamp, processed_label_id):
@@ -410,7 +423,9 @@ def fetch_verification_code(service, start_timestamp, processed_label_id):
     return None, None
 
 def download_from_hennge(url, password_candidates, service, processed_label_id):
+    logging.info(f"HENNGEからファイルのダウンロードを開始します URL: {url}")
     my_email = service.users().getProfile(userId='me').execute().get('emailAddress', '')
+    
     for f in glob.glob(str(DOWNLOAD_DIR / '*')): 
         try: os.remove(f)
         except Exception: pass
@@ -427,6 +442,7 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
         successful_password, successful_pass_msg_id = None, None
 
         for idx, (score, cand_password, p_subj, p_date, p_msg_id, t_diff) in enumerate(password_candidates):
+            logging.info(f"🔑 パスワード試行中 ({idx + 1}/{len(password_candidates)}): {cand_password}")
             pass_input.clear()
             pass_input.send_keys(cand_password)
             time.sleep(0.5)
@@ -442,10 +458,14 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
                 )
                 successful_password = cand_password
                 successful_pass_msg_id = p_msg_id
+                logging.info(f"✅ パスワード認証成功: {cand_password}")
                 break
-            except Exception: pass
+            except Exception:
+                logging.warning(f"パスワード認証失敗: {cand_password}")
 
-        if not successful_password: return None, None, None
+        if not successful_password:
+            logging.error("一致するダウンロードパスワードが見つかりませんでした。")
+            return None, None, None
 
         email_input.clear()
         email_input.send_keys(my_email)
@@ -455,8 +475,10 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
         send_code_btn = wait.until(EC.presence_of_element_located((By.XPATH, "//button[@type='submit' or contains(., '認証コード')]")))
         driver.execute_script("arguments[0].click();", send_code_btn)
 
+        logging.info("📧 Gmailから認証コードの受信を待機中...")
         auth_code, auth_msg_id = fetch_verification_code(service, request_timestamp, processed_label_id)
         if not auth_code: raise Exception("認証コードが取得できませんでした。")
+        logging.info(f"✅ 認証コードを受信しました: {auth_code}")
 
         code_input = wait.until(EC.presence_of_element_located((By.XPATH, "//input[@type='text' or @type='number']")))
         code_input.clear()
@@ -479,10 +501,12 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
 
         downloaded_files = glob.glob(str(DOWNLOAD_DIR / '*'))
         if downloaded_files:
-            return max(downloaded_files, key=os.path.getctime), successful_pass_msg_id, auth_msg_id
+            latest_file = max(downloaded_files, key=os.path.getctime)
+            logging.info(f"✅ ダウンロード完了: {latest_file}")
+            return latest_file, successful_pass_msg_id, auth_msg_id
         return None, None, None
     except Exception as e:
-        logging.error(f"HENNGEダウンロード例外: {e}")
+        logging.error(f"HENNGEダウンロード例外: {e}", exc_info=True)
         return None, None, None
     finally:
         if driver: driver.quit()
@@ -716,12 +740,9 @@ def process_excel_data(excel_path):
         
     return create_output_csv(extracted_data, stop_count, recovery_count)
 
-# --- エラー原因の「     備考     」を除外した完全なCSV生成処理 ---
 def create_output_csv(extracted_data, stop_count, recovery_count):
-    # BLASに登録されている唯一の備考用項目名（末尾スペース52文字）
     REMARK_COL_2 = "レジル様記入備考" + " " * 52
 
-    # エラーとなる「     備考     」を除外した正規の47項目定義
     ALL_HEADERS = [
         'BLAS_データ管理番号', 'BLAS_担当会社', '停止or復旧', '物件種別', '物件名', 
         '部屋番号※番号のみ入力', '物件住所', '工事会社', '作業者', '作業日', 
