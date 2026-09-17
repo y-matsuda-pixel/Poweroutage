@@ -1,6 +1,6 @@
 import sys
 print("==========================================", flush=True)
-print("=== PERFECT_CODE_VERSION_V3_ENGLISH_FIX ===", flush=True)
+print("=== PERFECT_CODE_VERSION_V4_CDP_DOWNLOAD ===", flush=True)
 print("==========================================", flush=True)
 
 # coding: utf-8
@@ -446,6 +446,13 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
     try:
         service_chrome = ChromeService(ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service_chrome, options=get_chrome_options())
+        
+        # Headless Chromeにおけるダウンロードパーミッションを強制許可
+        driver.execute_cdp_cmd("Page.setDownloadBehavior", {
+            "behavior": "allow",
+            "downloadPath": str(DOWNLOAD_DIR)
+        })
+
         wait = WebDriverWait(driver, 20)
         driver.get(url)
         time.sleep(3)
@@ -617,18 +624,26 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
             log_flush(f"⚠️ 遷移状態チェック中にエラー: {e}")
 
         # ==========================================
-        # STEP 4: ダウンロードボタンの全自動探索（日・英対応）
+        # STEP 4: ピンポイント全自動ファイルダウンロード
         # ==========================================
-        log_flush("📥 『ダウンロード(Download)』ボタンを探してクリックします")
+        log_flush("📥 『ダウンロード(Download)』ボタンをピンポイント探索してクリックします")
         
         download_clicked = False
         for attempt in range(10):
+            # ファイルリスト行のダウンロードボタン・リンクを直接クリック
             download_clicked = driver.execute_script("""
-                const els = document.querySelectorAll('button, a, div[role="button"], span');
+                // 1. 各ファイル行にある個別ダウンロード要素（a, button）を優先探索
+                const targets = document.querySelectorAll('a[download], a[href*="download"], button[aria-label*="Download"], button[aria-label*="ダウンロード"], tr td a, tr td button');
+                for (let el of targets) {
+                    el.click();
+                    return true;
+                }
+                
+                # 2. 見つからない場合はテキスト一致要素をクリック
+                const els = document.querySelectorAll('a, button, div[role="button"]');
                 for (let el of els) {
-                    const txt = (el.innerText || '').toLowerCase();
-                    const label = (el.getAttribute('aria-label') || '').toLowerCase();
-                    if (txt.includes('ダウンロード') || label.includes('ダウンロード') || txt.includes('download') || label.includes('download')) {
+                    const txt = (el.innerText || '').trim().toLowerCase();
+                    if (txt === 'download' || txt === 'ダウンロード') {
                         el.click();
                         return true;
                     }
@@ -636,7 +651,7 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
                 return false;
             """)
             if download_clicked:
-                log_flush("✅ JavaScriptによる『ダウンロード(Download)』ボタンの強制クリックに成功しました。")
+                log_flush("✅ JavaScriptによる『ダウンロード(Download)』ボタンの直接クリックに成功しました。")
                 break
             time.sleep(2)
 
@@ -645,12 +660,14 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
             log_flush(f"❌ ダウンロードボタンが発見できませんでした。画面表示: {body_text}", logging.ERROR)
             return None, None, None
 
+        # CDP許可下でのダウンロード生成待機
         wait_time = 0
         while wait_time < 60:
             time.sleep(2)
             wait_time += 2
             files = os.listdir(DOWNLOAD_DIR)
-            if files and not any(f.endswith('.crdownload') or f.endswith('.tmp') for f in files): break
+            if files and not any(f.endswith('.crdownload') or f.endswith('.tmp') for f in files):
+                break
 
         downloaded_files = glob.glob(str(DOWNLOAD_DIR / '*'))
         if downloaded_files:
