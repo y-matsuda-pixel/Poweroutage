@@ -1,6 +1,6 @@
 import sys
 print("==========================================", flush=True)
-print("=== PERFECT_CODE_VERSION_V5_JS_SYNTAX_FIX ===", flush=True)
+print("=== PERFECT_CODE_VERSION_V7_LARK_MSG_FIX ===", flush=True)
 print("==========================================", flush=True)
 
 # coding: utf-8
@@ -246,7 +246,7 @@ def send_combined_lark_report(success_list, failure_list):
                 "tag": "lark_md",
                 "content": (
                     f"**ステータス:** ✅ SUCCESS\n"
-                    f"**詳細:** レジル停止作業 「{item['name']}」 BLASおよびLarkシートの登録が完了しました\n"
+                    f"**詳細:** レジル停止作業 「{item['name']}」 BLASの登録が完了しました\n"
                     f"**地域:** {item['region']}\n"
                     f"**実行日時:** {now_str}"
                 )
@@ -447,7 +447,6 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
         service_chrome = ChromeService(ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service_chrome, options=get_chrome_options())
         
-        # Headless Chromeにおけるダウンロードパーミッションを強制許可
         driver.execute_cdp_cmd("Page.setDownloadBehavior", {
             "behavior": "allow",
             "downloadPath": str(DOWNLOAD_DIR)
@@ -630,7 +629,6 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
         
         download_clicked = False
         for attempt in range(10):
-            # JS構文コメント（//）で正しく記述
             download_clicked = driver.execute_script("""
                 // 1. 各ファイル行にある個別ダウンロード要素（a, button）を優先探索
                 const targets = document.querySelectorAll('a[download], a[href*="download"], button[aria-label*="Download"], button[aria-label*="ダウンロード"], tr td a, tr td button');
@@ -660,7 +658,6 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
             log_flush(f"❌ ダウンロードボタンが発見できませんでした。画面表示: {body_text}", logging.ERROR)
             return None, None, None
 
-        # CDP許可下でのダウンロード生成待機
         wait_time = 0
         while wait_time < 60:
             time.sleep(2)
@@ -744,10 +741,19 @@ def process_pdf_data(pdf_path):
         mid_l = mid_header['left'] if mid_header else 0
         mid_r = mid_header['right'] if mid_header else 120
 
-        mids = [el for el in text_elements if re.match(r'^\d+-[R\d]+', el['text']) and mid_l <= el['x0'] < mid_r]
+        mids = []
+        for el in text_elements:
+            txt = el['text'].strip()
+            if mid_l <= el['x0'] < mid_r and txt not in ['物件id', 'MID', 'ＭＩＤ', 'レジル', '旧ハウス', '旧Eハウス', '旧オリックス']:
+                if re.match(r'^[A-Za-z0-9-]+$', txt) and len(txt) >= 4:
+                    mids.append(el)
+
         mids.sort(key=lambda el: -el['y0'])
 
-        current_type, current_action = 'レジル', '停止'
+        type_headers = [
+            el for el in text_elements 
+            if any(kw in el['text'] for kw in ['レジル', '旧ハウス', '旧Eハウス', '旧オリックス', '旧NTT-AE'])
+        ]
 
         for idx, mid in enumerate(mids):
             mid_y = mid['y0']
@@ -756,6 +762,17 @@ def process_pdf_data(pdf_path):
 
             top_bound = (mid_y + prev_y) / 2.0
             bottom_bound = (mid_y + next_y) / 2.0
+
+            current_type = 'レジル'
+            above_types = [th for th in type_headers if th['y0'] > mid_y]
+            if above_types:
+                nearest_type = min(above_types, key=lambda th: th['y0'] - mid_y)['text']
+                if any(kw in nearest_type for kw in ['旧ハウス', '旧Eハウス', '旧オリックス']):
+                    current_type = 'NP'
+                elif any(kw in nearest_type for kw in ['レジル', '旧NTT-AE']):
+                    current_type = 'レジル'
+
+            current_action = '停止'
 
             row_elements = [el for el in text_elements if bottom_bound <= el['y0'] < top_bound]
             row_elements.sort(key=lambda el: (-el['y0'], el['x0']))
@@ -766,7 +783,7 @@ def process_pdf_data(pdf_path):
             for el in row_elements:
                 x_center = (el['x0'] + el['x1']) / 2.0
                 txt = el['text']
-                if txt == mid_val: continue
+                if txt == mid_val or txt in ['レジル', '旧ハウス', '旧Eハウス', '旧オリックス']: continue
 
                 matched_col = None
                 for hm in header_map:
@@ -777,7 +794,10 @@ def process_pdf_data(pdf_path):
                 if matched_col and txt not in field_values[matched_col]:
                     field_values[matched_col].append(txt)
 
-            obj_name = " ".join(field_values['物件名'])
+            obj_raw = "".join(field_values['物件名'])
+            obj_name = re.sub(r'^[「『"\'\s]+|[」』"\'\s]+$', '', obj_raw)
+            obj_name = re.sub(r'([一-龠ぁ-んァ-ヶーA-Za-z0-9])\s+([一-龠ぁ-んァ-ヶーA-Za-z0-9])', r'\1\2', obj_name)
+
             room_val = " ".join(field_values['部屋番号'])
             addr_raw = " ".join(field_values['住所'])
             visit_val = "".join(field_values['訪問'])
@@ -858,15 +878,16 @@ def process_excel_data(excel_path):
         if mid_col == -1 or obj_col == -1 or room_col == -1: continue
         
         mid_val = str(row[mid_col]).strip()
-        obj_name = str(row[obj_col]).strip()
+        obj_raw = str(row[obj_col]).strip()
         room_val = str(row[room_col]).strip()
 
         mid_val = '' if mid_val.lower() == 'nan' else mid_val
-        obj_name = '' if obj_name.lower() == 'nan' else obj_name
+        obj_raw = '' if obj_raw.lower() == 'nan' else obj_raw
         room_val = '' if room_val.lower() == 'nan' else room_val
 
-        if not obj_name or not room_val: continue
+        if not obj_raw or not room_val: continue
 
+        obj_name = re.sub(r'^[「『"\'\s]+|[」』"\'\s]+$', '', obj_raw)
         processed_room = re.sub(r'\.0$', '', room_val)
 
         pref_col, addr_col = get_c('都道府県'), get_c('物件住所', '住所')
@@ -1058,8 +1079,13 @@ if __name__ == '__main__':
 
             os.remove(file_path)
             
+            if p_count == 1:
+                display_name = f"{p_name}"
+            else:
+                display_name = f"{p_name}  外 ({p_count}件)"
+
             success_items.append({
-                "name": f"{p_name} 外 ({p_count}件)",
+                "name": display_name,
                 "region": detected_region
             })
             
