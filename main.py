@@ -288,7 +288,7 @@ def write_to_lark_sheet(extracted_data, detected_region):
         except Exception as e:
             log_flush(f"Larkシート停止書き込み例外: {e}", logging.ERROR)
 
-    # --- 復旧データは従来通り1件ずつ件名入りで転記 ---
+    # --- 復旧データは1件ずつ件名入りで転記 ---
     for d in recovery_items:
         action = "【復旧】"
         subject = f"{action}{d['物件名']} {d['部屋番号']}"
