@@ -1,6 +1,6 @@
 import sys
 print("==========================================", flush=True)
-print("=== PERFECT_CODE_VERSION_V7_LARK_MSG_FIX ===", flush=True)
+print("=== PERFECT_CODE_VERSION_V8_LARK_STOP_1ROW_AND_EMAIL ===", flush=True)
 print("==========================================", flush=True)
 
 # coding: utf-8
@@ -51,6 +51,7 @@ LARK_APP_ID = os.getenv('LARK_APP_ID', "cli_aac716ae45b81e14")
 LARK_APP_SECRET = os.getenv('LARK_APP_SECRET', '')
 LARK_WIKI_TOKEN = "Ykm6w1c70iDJ0kkmM68jPcf5pEf"
 DEFAULT_SHEET_ID = "Yb6Zwo"
+EMAIL_SHEET_ID = "KTGtTb"
 
 FIXED_COMPANY_NAME = "ベイシス株式会社 IoT推進部"
 
@@ -143,6 +144,65 @@ def get_lark_tenant_access_token():
 def get_spreadsheet_token(tenant_token):
     return LARK_WIKI_TOKEN
 
+def write_email_to_lark_sheet(email_info):
+    if not email_info: return
+    tenant_token = get_lark_tenant_access_token()
+    if not tenant_token:
+        log_flush("Lark APIトークンが取得できなかったため、メール転記をスキップします。", logging.WARNING)
+        return
+
+    spreadsheet_token = LARK_WIKI_TOKEN
+    headers = {
+        "Authorization": f"Bearer {tenant_token}",
+        "Content-Type": "application/json; charset=utf-8"
+    }
+
+    sheet_id = EMAIL_SHEET_ID
+    try:
+        sheets_url = f"https://open.larksuite.com/open-apis/sheets/v3/spreadsheets/{spreadsheet_token}/sheets/query"
+        res_sheets = requests.get(sheets_url, headers=headers, timeout=10)
+        res_data = res_sheets.json()
+        if res_sheets.status_code == 200 and res_data.get("code") == 0:
+            sheets_list = res_data.get("data", {}).get("sheets", [])
+            for s in sheets_list:
+                if "復旧依頼メール" in s.get("title", ""):
+                    sheet_id = s.get("sheet_id")
+                    break
+    except Exception as e:
+        log_flush(f"メール用シートタブ検索エラー: {e}", logging.WARNING)
+
+    read_url = f"https://open.larksuite.com/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}/values/{sheet_id}!A1:A500"
+    target_row = 2
+    try:
+        res_read = requests.get(read_url, headers=headers, timeout=10)
+        res_read_data = res_read.json()
+        if res_read.status_code == 200 and res_read_data.get("code") == 0:
+            values = res_read_data.get("data", {}).get("valueRange", {}).get("values", [])
+            target_row = len(values) + 1 if values else 2
+    except Exception as e:
+        log_flush(f"メール用空行判定エラー: {e}", logging.WARNING)
+
+    write_url = f"https://open.larksuite.com/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}/values"
+    row_data = [
+        email_info.get('date_str', jst_now().strftime('%Y/%m/%d %H:%M:%S')),
+        email_info.get('from', ''),
+        email_info.get('subject', ''),
+        email_info.get('body', '')
+    ]
+
+    body_payload = {
+        "valueRange": {
+            "range": f"{sheet_id}!A{target_row}:D{target_row}",
+            "values": [row_data]
+        }
+    }
+
+    try:
+        requests.put(write_url, headers=headers, json=body_payload, timeout=10)
+        log_flush(f"📧 Lark [復旧依頼メール] (行{target_row}) にメール情報を転記完了: {email_info.get('subject', '')}")
+    except Exception as e:
+        log_flush(f"Larkメールシート書き込み例外: {e}", logging.ERROR)
+
 def write_to_lark_sheet(extracted_data, detected_region):
     tenant_token = get_lark_tenant_access_token()
     if not tenant_token:
@@ -205,20 +265,40 @@ def write_to_lark_sheet(extracted_data, detected_region):
     next_biz_day = get_next_business_day().strftime('%Y/%m/%d')
     write_url = f"https://open.larksuite.com/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}/values"
 
-    for d in extracted_data:
-        team = "ガスプラ課" if detected_region == "関東" else "西日本"
-        action = f"【{d['停止or復旧']}】"
-        subject = f"{action}{d['物件名']} {d['部屋番号']}"
+    stop_items = [d for d in extracted_data if d.get('停止or復旧') != '復旧']
+    recovery_items = [d for d in extracted_data if d.get('停止or復旧') == '復旧']
 
-        row_bj = ["", team, action, d['物件種別'], subject, next_biz_day, 1, 35000, 3500]
+    team = "ガスプラ課" if detected_region == "関東" else "西日本"
 
+    # --- 停止データは1行のみ転記（件名は空欄） ---
+    if stop_items:
+        kind = stop_items[0]['物件種別']
+        action = "【停止】"
+        row_bj = ["", team, action, kind, "", next_biz_day, 1, 35000, 3500]
         body_bj = {
             "valueRange": {
                 "range": f"{sheet_id}!B{target_row}:J{target_row}",
                 "values": [row_bj]
             }
         }
-        
+        try:
+            requests.put(write_url, headers=headers, json=body_bj, timeout=10)
+            log_flush(f"📝 Larkシート [{target_sheet_title}] (行{target_row}) に停止1行転記完了: {action} ({len(stop_items)}件分)")
+            target_row += 1
+        except Exception as e:
+            log_flush(f"Larkシート停止書き込み例外: {e}", logging.ERROR)
+
+    # --- 復旧データは従来通り1件ずつ件名入りで転記 ---
+    for d in recovery_items:
+        action = "【復旧】"
+        subject = f"{action}{d['物件名']} {d['部屋番号']}"
+        row_bj = ["", team, action, d['物件種別'], subject, next_biz_day, 1, 35000, 3500]
+        body_bj = {
+            "valueRange": {
+                "range": f"{sheet_id}!B{target_row}:J{target_row}",
+                "values": [row_bj]
+            }
+        }
         try:
             requests.put(write_url, headers=headers, json=body_bj, timeout=10)
             if d.get('備考'):
@@ -229,10 +309,10 @@ def write_to_lark_sheet(extracted_data, detected_region):
                     }
                 }
                 requests.put(write_url, headers=headers, json=body_k, timeout=10)
-            log_flush(f"📝 Larkシート [{target_sheet_title}] (行{target_row}) に転記完了: {subject}")
+            log_flush(f"📝 Larkシート [{target_sheet_title}] (行{target_row}) に復旧転記完了: {subject}")
             target_row += 1
         except Exception as e:
-            log_flush(f"Larkシート書き込み例外: {e}", logging.ERROR)
+            log_flush(f"Larkシート復旧書き込み例外: {e}", logging.ERROR)
 
 def send_combined_lark_report(success_list, failure_list):
     if not LARK_WEBHOOK_URL or (not success_list and not failure_list): return
@@ -345,6 +425,7 @@ def get_email_body(payload):
 def fetch_hennge_details(service, processed_label_id):
     url, subject_text = None, ""
     url_msg_id, url_msg_timestamp, url_from, url_thread_id, target_region = None, 0, "", "", None
+    email_info = None
     log_flush("Gmail APIに接続し、対象メールを検索中...")
     try:
         search_query = 'label:電力停止 停止 -label:処理済み'
@@ -371,6 +452,15 @@ def fetch_hennge_details(service, processed_label_id):
                 url_from = headers.get('from', '')
                 subject_text = subj
                 url_msg_timestamp = int(msg.get('internalDate', 0)) / 1000
+                
+                email_dt = datetime.datetime.fromtimestamp(url_msg_timestamp, JST)
+                email_info = {
+                    'from': url_from,
+                    'subject': subj,
+                    'body': body,
+                    'date_str': email_dt.strftime('%Y/%m/%d %H:%M:%S')
+                }
+
                 if "関西" in subject_text: target_region = "関西"
                 elif "関東" in subject_text: target_region = "関東"
                 log_flush(f"📧 対象メール発見 - 件名: {subj}")
@@ -378,7 +468,7 @@ def fetch_hennge_details(service, processed_label_id):
 
         if not url:
             log_flush("❌ 対象のHENNGE URLを含む未処理メールが見つかりませんでした。")
-            return None, [], "", None
+            return None, [], "", None, None
 
         log_flush(f"🔗 取得したダウンロードURL: {url}")
 
@@ -414,11 +504,11 @@ def fetch_hennge_details(service, processed_label_id):
                 unique_candidates.append(c_item)
 
         log_flush(f"🔑 抽出したパスワード候補 ({len(unique_candidates)}件): {[c[1] for c in unique_candidates]}")
-        return url, unique_candidates, subject_text, url_msg_id
+        return url, unique_candidates, subject_text, url_msg_id, email_info
 
     except Exception as e:
         log_flush(f"Gmail API 取得エラー: {e}", logging.ERROR)
-        return None, [], "", None
+        return None, [], "", None, None
 
 def fetch_verification_code(service, start_timestamp, processed_label_id):
     for _ in range(15):
@@ -992,7 +1082,7 @@ if __name__ == '__main__':
     gmail_service = get_gmail_service()
     processed_label_id = get_or_create_processed_label_id(gmail_service, "処理済み")
     
-    target_url, password_candidates, subject_text, url_msg_id = fetch_hennge_details(gmail_service, processed_label_id)
+    target_url, password_candidates, subject_text, url_msg_id, email_info = fetch_hennge_details(gmail_service, processed_label_id)
     
     if not target_url or not password_candidates:
         log_flush("有効な対象メールまたはパスワードが見つかりませんでした。処理を終了します。")
@@ -1075,7 +1165,12 @@ if __name__ == '__main__':
             shutil.move(str(unique_csv_path), PROCESSED_DIR / f"output_{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}.csv")
             
             detected_region = get_region_from_info(file_name, p_addr)
+            
+            # ラークシート（月別タブ）へ転記（停止は1行のみ）
             write_to_lark_sheet(ext_data, detected_region)
+            
+            # ラークシート（復旧依頼メールタブ）へメール本文を転記
+            write_email_to_lark_sheet(email_info)
 
             os.remove(file_path)
             
