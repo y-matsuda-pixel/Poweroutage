@@ -1,6 +1,6 @@
 import sys
 print("==========================================", flush=True)
-print("=== PERFECT_CODE_VERSION_V2_TRANSITION ===", flush=True)
+print("=== PERFECT_CODE_VERSION_V3_ENGLISH_FIX ===", flush=True)
 print("==========================================", flush=True)
 
 # coding: utf-8
@@ -595,7 +595,7 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
         log_flush("⏳ 画面遷移（ファイル受信画面）を待機しています...")
         time.sleep(5)
 
-        # --- ▼ 追加：画面遷移の確認ログ ▼ ---
+        # --- 画面遷移の確認ログ ---
         try:
             current_url = driver.current_url
             page_title = driver.title
@@ -606,8 +606,8 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
             log_flush(f"👀 【画面遷移チェッカー】 ページタイトル: {page_title}")
             log_flush(f"👀 【画面遷移チェッカー】 画面テキスト(先頭): {body_text[:100]}...")
             
-            if "ダウンロード" in body_text or "Download" in body_text:
-                log_flush("✅ 【成功判定】 画面上に「ダウンロード」の文字を確認しました。遷移成功です！")
+            if "ダウンロード" in body_text or "Download" in body_text or "download" in body_text:
+                log_flush("✅ 【成功判定】 画面上に「ダウンロード/Download」の文字を確認しました。遷移成功です！")
             elif "パスワード" in body_text or "コード" in body_text:
                 log_flush("⚠️ 【警告】 画面が切り替わっていません。まだ認証画面に留まっています。")
             else:
@@ -615,21 +615,20 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
             log_flush("==========================================")
         except Exception as e:
             log_flush(f"⚠️ 遷移状態チェック中にエラー: {e}")
-        # --- ▲ 追加部分 ここまで ▲ ---
 
         # ==========================================
-        # STEP 4: ダウンロードボタンの全自動探索
+        # STEP 4: ダウンロードボタンの全自動探索（日・英対応）
         # ==========================================
-        log_flush("📥 『ダウンロード』ボタンを探してクリックします")
+        log_flush("📥 『ダウンロード(Download)』ボタンを探してクリックします")
         
         download_clicked = False
         for attempt in range(10):
             download_clicked = driver.execute_script("""
                 const els = document.querySelectorAll('button, a, div[role="button"], span');
                 for (let el of els) {
-                    const txt = el.innerText || '';
-                    const label = el.getAttribute('aria-label') || '';
-                    if (txt.includes('ダウンロード') || label.includes('ダウンロード')) {
+                    const txt = (el.innerText || '').toLowerCase();
+                    const label = (el.getAttribute('aria-label') || '').toLowerCase();
+                    if (txt.includes('ダウンロード') || label.includes('ダウンロード') || txt.includes('download') || label.includes('download')) {
                         el.click();
                         return true;
                     }
@@ -637,7 +636,7 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
                 return false;
             """)
             if download_clicked:
-                log_flush("✅ JavaScriptによる『ダウンロード』ボタンの強制クリックに成功しました。")
+                log_flush("✅ JavaScriptによる『ダウンロード(Download)』ボタンの強制クリックに成功しました。")
                 break
             time.sleep(2)
 
