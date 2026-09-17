@@ -1,6 +1,6 @@
 import sys
 print("==========================================", flush=True)
-print("=== PERFECT_CODE_VERSION_V4_CDP_DOWNLOAD ===", flush=True)
+print("=== PERFECT_CODE_VERSION_V5_JS_SYNTAX_FIX ===", flush=True)
 print("==========================================", flush=True)
 
 # coding: utf-8
@@ -630,7 +630,7 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
         
         download_clicked = False
         for attempt in range(10):
-            # ファイルリスト行のダウンロードボタン・リンクを直接クリック
+            # JS構文コメント（//）で正しく記述
             download_clicked = driver.execute_script("""
                 // 1. 各ファイル行にある個別ダウンロード要素（a, button）を優先探索
                 const targets = document.querySelectorAll('a[download], a[href*="download"], button[aria-label*="Download"], button[aria-label*="ダウンロード"], tr td a, tr td button');
@@ -639,7 +639,7 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
                     return true;
                 }
                 
-                # 2. 見つからない場合はテキスト一致要素をクリック
+                // 2. 見つからない場合はテキスト一致要素をクリック
                 const els = document.querySelectorAll('a, button, div[role="button"]');
                 for (let el of els) {
                     const txt = (el.innerText || '').trim().toLowerCase();
