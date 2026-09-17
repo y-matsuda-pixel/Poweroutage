@@ -1,6 +1,6 @@
 import sys
 print("==========================================", flush=True)
-print("=== PERFECT_CODE_VERSION_V9_ORANGE_LARK_NOTIFICATION ===", flush=True)
+print("=== PERFECT_CODE_VERSION_V10_LARK_D_COL_TARGET ===", flush=True)
 print("==========================================", flush=True)
 
 # coding: utf-8
@@ -245,20 +245,20 @@ def write_to_lark_sheet(extracted_data, detected_region):
         except Exception as e:
             sheet_id = DEFAULT_SHEET_ID
 
-    read_url = f"https://open.larksuite.com/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}/values/{sheet_id}!B1:B200"
+    # D列（【停止】や【復旧】の入力列）の入力済みセルを探索して、その次の行を特定
+    read_url = f"https://open.larksuite.com/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}/values/{sheet_id}!D1:D500"
     target_row = 4
     try:
         res_read = requests.get(read_url, headers=headers, timeout=10)
         res_read_data = res_read.json()
         if res_read.status_code == 200 and res_read_data.get("code") == 0:
             values = res_read_data.get("data", {}).get("valueRange", {}).get("values", [])
-            for idx in range(3, len(values)):
-                row_val = values[idx]
-                if not row_val or not str(row_val[0]).strip():
-                    target_row = idx + 1
-                    break
-            else:
-                target_row = len(values) + 1 if len(values) >= 3 else 4
+            last_filled_row = 3
+            for idx, row_val in enumerate(values):
+                row_num = idx + 1
+                if row_num >= 4 and row_val and str(row_val[0]).strip():
+                    last_filled_row = row_num
+            target_row = max(last_filled_row + 1, 4)
     except Exception as e:
         log_flush(f"空行判定エラー: {e}", logging.WARNING)
 
