@@ -1,6 +1,6 @@
 import sys
 print("==========================================", flush=True)
-print("=== PERFECT_CODE_VERSION_V8_LARK_STOP_1ROW_AND_EMAIL ===", flush=True)
+print("=== PERFECT_CODE_VERSION_V9_ORANGE_LARK_NOTIFICATION ===", flush=True)
 print("==========================================", flush=True)
 
 # coding: utf-8
@@ -354,7 +354,7 @@ def send_combined_lark_report(success_list, failure_list):
         "card": {
             "header": {
                 "title": {"tag": "plain_text", "content": "🤖 Web自動化処理 SUCCESS" if not failure_list else "⚠️ Web自動化処理 REPORT"},
-                "template": "green" if not failure_list else "red"
+                "template": "orange"
             },
             "elements": elements
         }
