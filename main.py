@@ -142,6 +142,19 @@ def get_lark_tenant_access_token():
     return None
 
 def get_spreadsheet_token(tenant_token):
+    url = f"https://open.larksuite.com/open-apis/wiki/v2/nodes/get_node?token={LARK_WIKI_TOKEN}"
+    headers = {"Authorization": f"Bearer {tenant_token}"}
+    try:
+        res = requests.get(url, headers=headers, timeout=10)
+        res_json = res.json()
+        if res_json.get("code") == 0:
+            obj_token = res_json.get("data", {}).get("node", {}).get("obj_token")
+            if obj_token:
+                log_flush(f"🔑 WikiトークンからSpreadsheetトークンを取得成功: {obj_token}")
+                return obj_token
+        log_flush(f"Wikiトークン変換失敗: {res_json}", logging.WARNING)
+    except Exception as e:
+        log_flush(f"Wikiトークン変換例外: {e}", logging.ERROR)
     return LARK_WIKI_TOKEN
 
 def write_email_to_lark_sheet(email_info):
@@ -151,7 +164,7 @@ def write_email_to_lark_sheet(email_info):
         log_flush("Lark APIトークンが取得できなかったため、メール転記をスキップします。", logging.WARNING)
         return
 
-    spreadsheet_token = LARK_WIKI_TOKEN
+    spreadsheet_token = get_spreadsheet_token(tenant_token)
     headers = {
         "Authorization": f"Bearer {tenant_token}",
         "Content-Type": "application/json; charset=utf-8"
@@ -905,9 +918,9 @@ def process_pdf_data(pdf_path):
 
             if action_status == '復旧':
                 recovery_count += 1
-                continue
+            else:
+                stop_count += 1
 
-            stop_count += 1
             al_status = '' if not al_raw else ('有' if any(k in al_raw for k in ['放', '有', 'あり']) else '無')
 
             extracted_data.append({
@@ -1003,9 +1016,8 @@ def process_excel_data(excel_path):
             
         if action_status == '復旧':
             recovery_count += 1
-            continue
-            
-        stop_count += 1
+        else:
+            stop_count += 1
 
         extracted_data.append({
             '停止or復旧': action_status,
@@ -1041,8 +1053,10 @@ def create_output_csv(extracted_data, stop_count, recovery_count):
         '【作業後】', '【文書投函写真】', '予備1', '予備2', '予備3', '予備4', '予備5'
     ]
 
+    stop_extracted_data = [d for d in extracted_data if d.get('停止or復旧') != '復旧']
+
     final_rows = []
-    for idx, d in enumerate(extracted_data):
+    for idx, d in enumerate(stop_extracted_data):
         row_dict = {h: '' for h in ALL_HEADERS}
         row_dict['BLAS_データ管理番号'] = idx + 1
         row_dict['BLAS_担当会社'] = FIXED_COMPANY_NAME
@@ -1074,7 +1088,8 @@ def create_output_csv(extracted_data, stop_count, recovery_count):
     df_final.to_csv(unique_csv_path, index=False, encoding='utf-8-sig')
     
     first_address = extracted_data[0]['住所'] if extracted_data else ""
-    return extracted_data[0]['物件名'], len(df_final), stop_count, recovery_count, first_address, unique_csv_path, extracted_data
+    first_name = extracted_data[0]['物件名'] if extracted_data else "対象データ"
+    return first_name, len(df_final), stop_count, recovery_count, first_address, unique_csv_path, extracted_data
 
 # --- メイン処理 ---
 if __name__ == '__main__':
@@ -1133,8 +1148,15 @@ if __name__ == '__main__':
             else:
                 p_name, p_count, s_count, r_count, p_addr, unique_csv_path, ext_data = process_excel_data(file_path)
 
+            detected_region = get_region_from_info(file_name, p_addr)
+
+            # ラークシート（月別タブ）へ転記（停止は1行のみ）
+            if ext_data:
+                write_to_lark_sheet(ext_data, detected_region)
+                write_email_to_lark_sheet(email_info)
+
             if p_count == 0:
-                log_flush(f"⏭️ {file_name} には「停止」対象データがありませんでした（復旧データ {r_count}件 をスキップ）。")
+                log_flush(f"⏭️ {file_name} には「停止」対象データがありませんでした（復旧データ {r_count}件 のLark転記完了）。")
                 os.remove(file_path)
                 continue
 
@@ -1163,14 +1185,6 @@ if __name__ == '__main__':
             time.sleep(10)
             
             shutil.move(str(unique_csv_path), PROCESSED_DIR / f"output_{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}.csv")
-            
-            detected_region = get_region_from_info(file_name, p_addr)
-            
-            # ラークシート（月別タブ）へ転記（停止は1行のみ）
-            write_to_lark_sheet(ext_data, detected_region)
-            
-            # ラークシート（復旧依頼メールタブ）へメール本文を転記
-            write_email_to_lark_sheet(email_info)
 
             os.remove(file_path)
             
