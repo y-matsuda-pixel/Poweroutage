@@ -1,6 +1,6 @@
 import sys
 print("==========================================", flush=True)
-print("=== PERFECT_CODE_VERSION_V10_LARK_D_COL_TARGET ===", flush=True)
+print("=== PERFECT_CODE_VERSION_V13_FINAL ===", flush=True)
 print("==========================================", flush=True)
 
 # coding: utf-8
@@ -266,7 +266,6 @@ def write_to_lark_sheet(extracted_data, detected_region):
         except Exception as e:
             sheet_id = DEFAULT_SHEET_ID
 
-    # C列（担当チーム：ガスプラ課/西日本）の入力済みセルを判定基準として、直前のNOと次の行番号を特定
     read_url = f"https://open.larksuite.com/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}/values/{sheet_id}!B1:C500"
     target_row = 4
     last_no = 0
@@ -286,7 +285,6 @@ def write_to_lark_sheet(extracted_data, detected_region):
                     b_str = str(b_val).strip() if b_val is not None else ""
                     c_str = str(c_val).strip() if c_val is not None else ""
                     
-                    # C列（担当チーム）に値が入っていれば「入力済み行」と判定
                     if c_str and c_str.lower() != 'none':
                         last_filled_row = row_num
                         if b_str and b_str.lower() != 'none':
@@ -309,7 +307,6 @@ def write_to_lark_sheet(extracted_data, detected_region):
     team = "ガスプラ課" if detected_region == "関東" else "西日本"
     current_no = last_no
 
-    # --- 停止データは1行のみ転記（件名は空欄、NOを連番出力） ---
     if stop_items:
         current_no += 1
         kind = stop_items[0]['物件種別']
@@ -328,7 +325,6 @@ def write_to_lark_sheet(extracted_data, detected_region):
         except Exception as e:
             log_flush(f"Larkシート停止書き込み例外: {e}", logging.ERROR)
 
-    # --- 復旧データは1件ずつ件名入りで転記（NOを連番出力） ---
     for d in recovery_items:
         current_no += 1
         action = "【復旧】"
@@ -592,9 +588,6 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
             log_flush(f"❌ 画面エラー検知（アクセス拒否/リンク切れ/有効期限切れ）", logging.ERROR)
             return None, None, None
 
-        # ==========================================
-        # STEP 1: パスワード入力
-        # ==========================================
         email_input = None
         try:
             email_input = driver.find_element(By.XPATH, "//input[@type='email' or contains(@placeholder, 'メールアドレス') or contains(@name, 'email')]")
@@ -652,9 +645,6 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
                 log_flush("❌ 全パスワード候補で認証失敗、またはタイムアウトしました。", logging.ERROR)
                 return None, None, None
 
-        # ==========================================
-        # STEP 2: メールアドレス入力と送信
-        # ==========================================
         if not email_input:
             email_input = wait.until(EC.presence_of_element_located((By.XPATH, "//input[@type='email' or contains(@placeholder, 'メールアドレス') or contains(@name, 'email')]")))
 
@@ -690,9 +680,6 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
             
         log_flush(f"✅ 認証コードを受信しました: {auth_code}")
 
-        # ==========================================
-        # STEP 3: 認証コード入力と確実な送信処理
-        # ==========================================
         code_input = wait.until(EC.presence_of_element_located((By.XPATH, "//input[@type='text' or @type='number' or contains(@placeholder, 'コード') or contains(@name, 'code')]")))
         code_input.clear()
         
@@ -732,7 +719,6 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
         log_flush("⏳ 画面遷移（ファイル受信画面）を待機しています...")
         time.sleep(5)
 
-        # --- 画面遷移の確認ログ ---
         try:
             current_url = driver.current_url
             page_title = driver.title
@@ -753,22 +739,17 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
         except Exception as e:
             log_flush(f"⚠️ 遷移状態チェック中にエラー: {e}")
 
-        # ==========================================
-        # STEP 4: ピンポイント全自動ファイルダウンロード
-        # ==========================================
         log_flush("📥 『ダウンロード(Download)』ボタンをピンポイント探索してクリックします")
         
         download_clicked = False
         for attempt in range(10):
             download_clicked = driver.execute_script("""
-                // 1. 各ファイル行にある個別ダウンロード要素（a, button）を優先探索
                 const targets = document.querySelectorAll('a[download], a[href*="download"], button[aria-label*="Download"], button[aria-label*="ダウンロード"], tr td a, tr td button');
                 for (let el of targets) {
                     el.click();
                     return true;
                 }
                 
-                // 2. 見つからない場合はテキスト一致要素をクリック
                 const els = document.querySelectorAll('a, button, div[role="button"]');
                 for (let el of els) {
                     const txt = (el.innerText || '').trim().toLowerCase();
@@ -833,7 +814,18 @@ def process_pdf_data(pdf_path):
                             'text': text
                         })
 
-        header_nodes = [el for el in text_elements if 505 <= el['y0'] <= 525]
+        # ヘッダーY座標を動的に自動探知
+        header_candidates = [
+            el for el in text_elements 
+            if any(k in el['text'].lower() for k in ['物件id', 'mid', 'ｍｉｄ', '物件名'])
+        ]
+        
+        if header_candidates:
+            header_y = header_candidates[0]['y0']
+            header_nodes = [el for el in text_elements if abs(el['y0'] - header_y) <= 15]
+        else:
+            header_nodes = [el for el in text_elements if 490 <= el['y0'] <= 535]
+            
         header_nodes.sort(key=lambda e: e['x0'])
 
         col_headers = []
@@ -873,17 +865,23 @@ def process_pdf_data(pdf_path):
         mid_r = mid_header['right'] if mid_header else 120
 
         mids = []
+        ignore_mid_words = ['物件id', 'mid', 'ｍｉｄ', 'レジル', '旧ハウス', '旧eハウス', '旧オリックス', '旧ntt-ae', 'esp']
+        
         for el in text_elements:
             txt = el['text'].strip()
-            if mid_l <= el['x0'] < mid_r and txt not in ['物件id', 'MID', 'ＭＩＤ', 'レジル', '旧ハウス', '旧Eハウス', '旧オリックス']:
-                if re.match(r'^[A-Za-z0-9-]+$', txt) and len(txt) >= 4:
-                    mids.append(el)
+            first_word = re.split(r'\s+', txt)[0]
+            
+            if mid_l <= el['x0'] < mid_r and first_word.lower() not in ignore_mid_words:
+                if re.match(r'^[A-Za-z0-9-]+$', first_word) and len(first_word) >= 4:
+                    el_copy = dict(el)
+                    el_copy['text'] = first_word  # 分離したMIDコードのみを適用
+                    mids.append(el_copy)
 
         mids.sort(key=lambda el: -el['y0'])
 
         type_headers = [
             el for el in text_elements 
-            if any(kw in el['text'] for kw in ['レジル', '旧ハウス', '旧Eハウス', '旧オリックス', '旧NTT-AE'])
+            if any(kw in el['text'] for kw in ['レジル', '旧ハウス', '旧Eハウス', '旧オリックス', '旧NTT-AE', 'ESP'])
         ]
 
         for idx, mid in enumerate(mids):
@@ -900,7 +898,7 @@ def process_pdf_data(pdf_path):
                 nearest_type = min(above_types, key=lambda th: th['y0'] - mid_y)['text']
                 if any(kw in nearest_type for kw in ['旧ハウス', '旧Eハウス', '旧オリックス']):
                     current_type = 'NP'
-                elif any(kw in nearest_type for kw in ['レジル', '旧NTT-AE']):
+                elif any(kw in nearest_type for kw in ['レジル', '旧NTT-AE', 'ESP']):
                     current_type = 'レジル'
 
             current_action = '停止'
@@ -914,13 +912,19 @@ def process_pdf_data(pdf_path):
             for el in row_elements:
                 x_center = (el['x0'] + el['x1']) / 2.0
                 txt = el['text']
-                if txt == mid_val or txt in ['レジル', '旧ハウス', '旧Eハウス', '旧オリックス']: continue
-
-                matched_col = None
-                for hm in header_map:
-                    if hm['left'] <= x_center < hm['right']:
-                        matched_col = hm['key']
-                        break
+                
+                # MID部分を削った後に残りのテキスト（物件名等）がある場合の絶対配置
+                if txt.startswith(mid_val):
+                    txt = txt[len(mid_val):].strip()
+                    if not txt: continue
+                    matched_col = '物件名'  # 座標判定をスキップして確実に物件名列へ救済
+                else:
+                    if txt in ['レジル', '旧ハウス', '旧Eハウス', '旧オリックス', 'ESP']: continue
+                    matched_col = None
+                    for hm in header_map:
+                        if hm['left'] <= x_center < hm['right']:
+                            matched_col = hm['key']
+                            break
 
                 if matched_col and txt not in field_values[matched_col]:
                     field_values[matched_col].append(txt)
@@ -940,9 +944,12 @@ def process_pdf_data(pdf_path):
             addr = re.sub(r'^\s*[\d\.]+\s+(?=[一-龠都道府県])', '', addr)
             addr = re.sub(r'\.0$', '', addr)
 
-            if '文書投函' in visit_val or '文書投函' in remark_val: action_status = '文書投函'
-            elif '復旧' in remark_val or '復旧' in kanri_val: action_status = '復旧'
-            else: action_status = current_action
+            if '文書投函' in visit_val or '文書投函' in remark_val:
+                action_status = '文書投函'
+            elif ('復旧' in remark_val or '復旧' in kanri_val) and '復旧費' not in remark_val:
+                action_status = '復旧'
+            else:
+                action_status = current_action
 
             if action_status == '復旧':
                 recovery_count += 1
@@ -988,7 +995,7 @@ def process_excel_data(excel_path):
 
     extracted_data = []
     current_action, current_type = '停止', 'NP'
-    suspension_keywords = {'＜レジル＞': 'レジル', '＜旧オリックス＞': 'NP', '＜旧Eハウス＞': 'NP', '＜旧NTT-AE＞': 'レジル'}
+    suspension_keywords = {'＜レジル＞': 'レジル', '＜旧オリックス＞': 'NP', '＜旧Eハウス＞': 'NP', '＜旧NTT-AE＞': 'レジル', '＜ESP＞': 'レジル'}
     stop_count, recovery_count = 0, 0
 
     for i in range(header_idx + 1, len(full_sheet)):
@@ -1040,7 +1047,8 @@ def process_excel_data(excel_path):
         kanri_val = str(row[kanri_col]).strip() if kanri_col != -1 else ''
         kanri_val = '' if kanri_val.lower() == 'nan' else kanri_val
         
-        if '復旧' in remark_val or '復旧' in kanri_val: action_status = '復旧'
+        if ('復旧' in remark_val or '復旧' in kanri_val) and '復旧費' not in remark_val:
+            action_status = '復旧'
             
         if action_status == '復旧':
             recovery_count += 1
@@ -1178,7 +1186,6 @@ if __name__ == '__main__':
 
             detected_region = get_region_from_info(file_name, p_addr)
 
-            # ラークシート（月別タブ）へ転記（停止は1行のみ）
             if ext_data:
                 write_to_lark_sheet(ext_data, detected_region)
                 write_email_to_lark_sheet(email_info)
