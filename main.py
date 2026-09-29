@@ -1,6 +1,6 @@
 import sys
 print("==========================================", flush=True)
-print("=== PERFECT_CODE_VERSION_V15_ULTIMATE_PARSER ===", flush=True)
+print("=== PERFECT_CODE_VERSION_V17_HYBRID_FINAL ===", flush=True)
 print("==========================================", flush=True)
 
 # coding: utf-8
@@ -66,7 +66,7 @@ KANTO_PREFS = ['東京都', '神奈川県', '埼玉県', '千葉県', '茨城県
 KANSAI_PREFS = ['大阪府', '京都府', '兵庫県', '奈良県', '滋賀県', '和歌山県']
 
 KANSAI_CITIES = ['大阪市', '京都市', '神戸市', '堺市', '奈良市', '和歌山市', '大津市', '東大阪市', '西宮市', '尼崎市', '豊中市', '吹田市', '枚方市', '高槻市', '茨木市', '八尾市', '寝屋川市', '姫路市', '明石市', '加古川市', '宝塚市', '伊丹市', '川西市', '精華', '木津川', '宇治市', '城陽市', '生駒市']
-KANTO_CITIES = ['横浜市', '川崎市', 'さいたま市', '千葉市', '相模原市', '船橋市', '川口市', '新宿区', '世田谷区', '港区', '渋谷区', '中央区', '千代田区', '品川区', '目黒区', '大田区', '杉並区', '練馬区', '八王子市', '町田市', '藤沢市', '横須賀市', '平塚市', '茅ヶ崎市', '大和市', '厚木市', '所沢市', '川越市', '越谷市', '草加市', '市川市', '松戸市', '柏市', '市原市', '宇都宮市', '前橋市', '高崎市', '水戸市']
+KANTO_CITIES = ['横浜市', '川崎市', 'さいたま市', '千葉市', '相模原市', '船橋市', '川口市', '新宿区', '世田谷区', '港区', '渋谷区', '中央区', '千代田区', '品川区', '目黒区', '大田区', '杉並区', '練馬区', '八王子市', '町田市', '藤沢市', '横須賀市', '平塚市', '茅ヶ崎市', '大和市', '厚木市', '所沢市', '川越市', '越谷市', '草加市', '市川市', '松戸市', '柏市', '市原市', '宇都宮市', '前橋市', '高崎市', '水戸市', '江戸川区']
 
 TEST_DOWNLOAD_ONLY = False
 TEST_CSV_ONLY = False
@@ -84,6 +84,17 @@ logging.basicConfig(
 )
 
 SCOPES = ['https://www.googleapis.com/auth/gmail.modify']
+
+# --- アプローチB: 項目名表記揺れ同義語辞書 ---
+COLUMN_ALIASES = {
+    'MID': ['物件id', 'mid', 'ｍｉｄ', 'id'],
+    '物件名': ['物件名', '件名', '物件', '建物名', '対象物件'],
+    '部屋番号': ['部屋番号', '号', '部番号', '番号', '部屋'],
+    '住所': ['物件住所', '住所', '所在地', '設置場所'],
+    '管理人': ['管理員様在籍日時', '管理人駐在時間', '管理員様', '在籍日時', '管理人', '管理員', '管理'],
+    'AL': ['al', 'オートロック', '有/解除番号有/無', '有/解除番号有', 'オートロックの有無'],
+    '備考': ['備考', 'メモ', '注意事項']
+}
 
 def log_flush(msg, level=logging.INFO):
     logging.log(level, msg)
@@ -106,6 +117,25 @@ def get_chrome_options():
     }
     options.add_experimental_option("prefs", prefs)
     return options
+
+def identify_column_key(text):
+    txt_clean = text.lower().replace(' ', '').replace(' ', '').replace('\n', '')
+    for std_key, aliases in COLUMN_ALIASES.items():
+        if any(alias in txt_clean for alias in aliases):
+            return std_key
+    return 'IGNORE'
+
+def is_address_text_strict(txt):
+    txt_clean = re.sub(r'^\s*0\s*', '', txt.strip())
+    all_prefs = KANTO_PREFS + KANSAI_PREFS + ['東京都', '大阪府', '京都府', '兵庫県', '埼玉県', '千葉県', '神奈川県']
+    if any(p in txt_clean for p in all_prefs):
+        return True
+    if any(c in txt_clean for c in KANTO_CITIES + KANSAI_CITIES):
+        return True
+    if re.search(r'[一-龠]{2,3}[都道府県]', txt_clean) or re.search(r'\d+丁目|\d+番地|\d+-\d+', txt_clean):
+        if not re.match(r'^\d+$', txt_clean) and not re.match(r'^[A-Za-z0-9-]+$', txt_clean):
+            return True
+    return False
 
 def get_region_from_info(filename, address):
     filename_lower = filename.lower() if filename else ""
@@ -793,184 +823,164 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
     finally:
         if driver: driver.quit()
 
-# --- スマート判定補助関数 ---
-def is_address_text(txt):
-    txt_clean = re.sub(r'^\s*0\s*', '', txt.strip())
-    prefectures = KANTO_PREFS + KANSAI_PREFS + ['東京都', '大阪府', '京都府', '兵庫県', '埼玉県', '千葉県', '神奈川県']
-    if any(p in txt_clean for p in prefectures):
-        return True
-    if any(c in txt_clean for c in KANTO_CITIES + KANSAI_CITIES):
-        return True
-    if re.search(r'[一-龠]{2,3}[都道府県]', txt_clean):
-        return True
-    return False
+# --- 動的ヘッダーマップ構築関数 ---
+def build_dynamic_header_map(page_els):
+    mid_headers = [el for el in page_els if any(k in el['text'].lower() for k in ['物件id', 'mid', 'ｍｉｄ'])]
+    if not mid_headers:
+        return [], None
+    
+    header_y = mid_headers[0]['y0']
+    header_els = [el for el in page_els if abs(el['y0'] - header_y) <= 8.0]
+    header_els.sort(key=lambda e: e['x0'])
+    
+    header_map = []
+    for idx, c in enumerate(header_els):
+        key = identify_column_key(c['text'])
+        l_bound = 0.0 if idx == 0 else header_map[-1]['right']
+        if idx == len(header_els) - 1:
+            r_bound = 9999.0
+        else:
+            r_bound = (c['x1'] + header_els[idx+1]['x0']) / 2.0
+            
+        header_map.append({
+            'key': key,
+            'left': l_bound,
+            'right': r_bound,
+            'text': c['text']
+        })
+    return header_map, header_y
 
-def is_mid_text(txt):
-    txt_clean = txt.strip()
-    if is_address_text(txt_clean):
-        return False
-    if re.match(r'^[A-Za-z0-9]+(-[A-Za-z0-9]+)+$', txt_clean) or re.match(r'^[A-Z][0-9]{8,12}$', txt_clean) or (re.match(r'^[A-Za-z0-9-]+$', txt_clean) and len(txt_clean) >= 4 and not re.match(r'^\d+$', txt_clean)):
-        ignore_words = ['http', 'hennge', 'select', '訪問', '投函', '要求', 'あり', 'なし', '時間', '電気停止訪問リスト', 'ベイシス様']
-        if not any(w in txt_clean.lower() for w in ignore_words):
-            return True
-    return False
-
-# --- PDFデータ動的自動解析処理 (完全対応版) ---
+# --- PDFデータ動的自動解析処理 (完全対応・ハイブリッド分類) ---
 def process_pdf_data(pdf_path):
     extracted_data = []
     stop_count, recovery_count = 0, 0
 
     for page_layout in extract_pages(pdf_path):
-        text_elements = []
+        page_els = []
         for element in page_layout:
             if isinstance(element, LTTextContainer):
                 for text_line in element:
-                    text = text_line.get_text().strip()
-                    if text:
+                    txt = text_line.get_text().strip()
+                    if txt:
                         bbox = text_line.bbox
-                        text_elements.append({
+                        page_els.append({
                             'x0': bbox[0],
                             'y0': bbox[1],
                             'x1': bbox[2],
                             'y1': bbox[3],
-                            'text': text
+                            'x_center': (bbox[0] + bbox[2]) / 2.0,
+                            'text': txt
                         })
 
-        header_candidates = [
-            el for el in text_elements 
-            if any(k in el['text'].lower() for k in ['物件id', 'mid', 'ｍｉｄ', '物件名', '件名'])
-        ]
-        
-        header_y = 515.0
-        if header_candidates:
-            header_y = header_candidates[0]['y0']
+        h_map, header_y = build_dynamic_header_map(page_els)
+        if not h_map:
+            continue
 
-        # MIDの全自動抽出（全セクションのMIDパターンを網羅）
+        # MIDの探知
         mids = []
-        ignore_mid_words = ['物件id', 'mid', 'ｍｉｄ', 'レジル', '旧ハウス', '旧eハウス', '旧オリックス', '旧ntt-ae', 'esp', '電気停止訪問リスト']
+        ignore_words = ['物件id', 'mid', 'ｍｉｄ', 'レジル', '旧ハウス', '旧eハウス', '旧オリックス', '旧ntt-ae', 'esp', '電気停止訪問リスト']
         
-        for el in text_elements:
+        for el in page_els:
             txt = el['text'].strip()
-            first_word = re.split(r'\s+', txt)[0]
-            
-            if first_word.lower() not in ignore_mid_words and is_mid_text(first_word):
-                el_copy = dict(el)
-                el_copy['text'] = first_word
-                mids.append(el_copy)
+            first_w = txt.split()[0]
+            m = re.match(r'^([A-Za-z0-9]+(-[A-Za-z0-9-]+)*)', first_w)
+            if m and el['x0'] < 140.0 and first_w.lower() not in ignore_words and len(first_w) >= 4:
+                mids.append({
+                    'mid': m.group(1),
+                    'y0': el['y0'],
+                    'raw_text': txt
+                })
 
-        mids.sort(key=lambda el: -el['y0'])
+        mids.sort(key=lambda x: -x['y0'])
 
         type_headers = [
-            el for el in text_elements 
+            el for el in page_els 
             if any(kw in el['text'] for kw in ['レジル', '旧ハウス', '旧Eハウス', '旧オリックス', '旧NTT-AE', 'ESP'])
         ]
 
-        # 行境界の設定とスマートパーサー分類
-        for idx, mid in enumerate(mids):
-            mid_y = mid['y0']
-            
-            if idx == 0:
-                top_bound = header_y - 2.0
-            else:
-                prev_y = mids[idx - 1]['y0']
-                top_bound = (mid_y + prev_y) / 2.0
+        for m in mids:
+            target_y = m['y0']
+            mid_code = m['mid']
 
-            if idx == len(mids) - 1:
-                bottom_bound = mid_y - 45.0
-            else:
-                next_y = mids[idx + 1]['y0']
-                bottom_bound = (mid_y + next_y) / 2.0
+            row_els = [el for el in page_els if -8.0 <= (el['y0'] - target_y) <= 10.0]
+
+            field_vals = {'物件名': [], '部屋番号': [], '住所': [], '訪問': [], '管理人': [], 'AL': [], '備考': []}
+
+            if m['raw_text'].startswith(mid_code):
+                rem = m['raw_text'][len(mid_code):].strip()
+                if rem:
+                    if is_address_text_strict(rem):
+                        clean_a = re.sub(r'^\s*0\s*', '', rem)
+                        clean_a = re.sub(r'^\s*\d{6}\s*', '', clean_a)
+                        field_vals['住所'].append(clean_a)
+                    elif rem not in field_vals['物件名']:
+                        field_vals['物件名'].append(rem)
+
+            for el in row_els:
+                txt = el['text'].strip()
+                x_c = el['x_center']
+
+                if txt == mid_code or txt.startswith(mid_code) or "物件id" in txt or "訪問日" in txt:
+                    continue
+
+                # 強制ルール: 明確な住所パターンの場合、X座標に関わらず住所へ分離格納
+                if is_address_text_strict(txt):
+                    clean_addr = re.sub(r'^\s*0\s*', '', txt)
+                    clean_addr = re.sub(r'^\s*\d{6}\s*', '', clean_addr)
+                    clean_addr = re.sub(r'\.0$', '', clean_addr)
+                    if clean_addr and clean_addr not in field_vals['住所']:
+                        field_vals['住所'].append(clean_addr)
+                    continue
+
+                matched_key = None
+                for hm in h_map:
+                    if hm['left'] <= x_c < hm['right']:
+                        matched_key = hm['key']
+                        break
+
+                if matched_key and matched_key in field_vals:
+                    if matched_key == 'AL':
+                        if any(k in txt for k in ['あり', 'なし', '有', '無', '解除番号']):
+                            if txt not in field_vals['AL']: field_vals['AL'].append(txt)
+                    elif matched_key == '物件名':
+                        if not txt.startswith("レジル") and txt not in field_vals['物件名']:
+                            field_vals['物件名'].append(txt)
+                    elif matched_key == '管理人':
+                        if txt not in ['要', '訪問'] and txt not in field_vals['管理人']:
+                            field_vals['管理人'].append(txt)
+                    elif matched_key == '訪問':
+                        if txt not in field_vals['訪問']:
+                            field_vals['訪問'].append(txt)
+                    else:
+                        if txt not in field_vals[matched_key]:
+                            field_vals[matched_key].append(txt)
 
             current_type = 'レジル'
-            above_types = [th for th in type_headers if th['y0'] > mid_y]
+            above_types = [th for th in type_headers if th['y0'] > target_y]
             if above_types:
-                nearest_type = min(above_types, key=lambda th: th['y0'] - mid_y)['text']
+                nearest_type = min(above_types, key=lambda th: th['y0'] - target_y)['text']
                 if any(kw in nearest_type for kw in ['旧ハウス', '旧Eハウス', '旧オリックス']):
                     current_type = 'NP'
                 elif any(kw in nearest_type for kw in ['レジル', '旧NTT-AE', 'ESP']):
                     current_type = 'レジル'
 
-            current_action = '停止'
-
-            row_elements = [el for el in text_elements if bottom_bound <= el['y0'] < top_bound]
-            row_elements.sort(key=lambda el: (-el['y0'], el['x0']))
-
-            field_values = {'MID': mid['text'], '物件名': [], '部屋番号': [], '住所': [], '訪問': [], '管理人': [], 'AL': [], '備考': []}
-            mid_val = mid['text']
-
-            ignore_section_words = ['レジル', '旧ハウス', '旧Eハウス', '旧オリックス', '旧NTT-AE', 'ESP', '電気停止訪問リスト', 'ベイシス様']
-
-            for el in row_elements:
-                txt = el['text'].strip()
-                if not txt: continue
-
-                if txt == mid_val or any(w in txt for w in ignore_section_words) or txt.startswith("物件id"):
-                    if txt.startswith(mid_val) and len(txt) > len(mid_val):
-                        rem_txt = txt[len(mid_val):].strip()
-                        if rem_txt and rem_txt not in field_values['物件名']:
-                            field_values['物件名'].append(rem_txt)
-                    continue
-
-                # 1. 住所判定（全地域対応パターン）
-                if is_address_text(txt):
-                    clean_addr = re.sub(r'^\s*0\s*', '', txt)
-                    clean_addr = re.sub(r'^\s*[\d\.]+\s+(?=[一-龠都道府県])', '', clean_addr)
-                    clean_addr = re.sub(r'\.0$', '', clean_addr)
-                    if clean_addr not in field_values['住所']:
-                        field_values['住所'].append(clean_addr)
-                    continue
-
-                # 2. 部屋番号判定
-                if re.match(r'^[A-Za-z]?[-]?\d+(号|号室|電灯)?$', txt) and len(txt) <= 8 and not is_address_text(txt):
-                    if txt not in field_values['部屋番号']:
-                        field_values['部屋番号'].append(txt)
-                    continue
-
-                # 3. 管理人・時間判定
-                if any(k in txt for k in ['勤務', '在籍', '駐在', '8:00', '9:00', '17:00', '18:00', '24時間', '不在', '月~金', '毎日', '月一金']):
-                    if txt not in field_values['管理人']:
-                        field_values['管理人'].append(txt)
-                    continue
-
-                # 4. オートロック(AL)判定
-                if txt in ['あり', 'なし', '有', '無'] or '解除番号' in txt:
-                    if txt not in field_values['AL']:
-                        field_values['AL'].append(txt)
-                    continue
-
-                # 5. 訪問・投函判定
-                if txt in ['訪問', '要', '訪問要', '文書', '投函', '文書投函']:
-                    if txt not in field_values['訪問']:
-                        field_values['訪問'].append(txt)
-                    continue
-
-                # 6. 物件名判定
-                if re.search(r'[一-龠ぁ-んァ-ヶーA-Za-z]', txt):
-                    if txt not in field_values['物件名']:
-                        field_values['物件名'].append(txt)
-                    continue
-
-                # 7. その他備考
-                if txt not in field_values['備考']:
-                    field_values['備考'].append(txt)
-
-            obj_raw = "".join(field_values['物件名'])
+            obj_raw = "".join(field_vals['物件名'])
             obj_name = re.sub(r'^[「『"\'\s]+|[」』"\'\s]+$', '', obj_raw)
             obj_name = re.sub(r'([一-龠ぁ-んァ-ヶーA-Za-z0-9])\s+([一-龠ぁ-んァ-ヶーA-Za-z0-9])', r'\1\2', obj_name)
 
-            room_val = " ".join(field_values['部屋番号'])
-            addr_val = " ".join(field_values['住所'])
-            visit_val = "".join(field_values['訪問'])
-            kanri_val = " ".join(field_values['管理人'])
-            al_raw = " ".join(field_values['AL'])
-            remark_val = " ".join(field_values['備考'])
+            room_val = " ".join(field_vals['部屋番号'])
+            addr_val = " ".join(field_vals['住所'])
+            visit_val = "".join(field_vals['訪問'])
+            kanri_val = " ".join(field_vals['管理人'])
+            al_raw = " ".join(field_vals['AL'])
+            remark_val = " ".join(field_vals['備考'])
 
             if '文書投函' in visit_val or '文書投函' in remark_val:
                 action_status = '文書投函'
             elif ('復旧' in remark_val or '復旧' in kanri_val) and '復旧費' not in remark_val:
                 action_status = '復旧'
             else:
-                action_status = current_action
+                action_status = '停止'
 
             if action_status == '復旧':
                 recovery_count += 1
@@ -986,7 +996,7 @@ def process_pdf_data(pdf_path):
                     '物件名': obj_name,
                     '部屋番号': room_val,
                     '住所': addr_val,
-                    'ＭＩＤ': mid_val,
+                    'ＭＩＤ': mid_code,
                     '管理人': kanri_val,
                     'AL': al_status,
                     '備考': remark_val
