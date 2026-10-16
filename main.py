@@ -521,11 +521,6 @@ def fetch_hennge_details(service, processed_label_id):
             url_match = re.search(r'(https://[a-zA-Z0-9.-]*transfer\.hennge\.com/[^\s"\'<>]+)', clean_body)
 
             if url_match and not url:
-            body = get_email_body(msg['payload'])
-            clean_body = re.sub(r'<[^>]+>', ' ', body).replace('\r\n', ' ').replace('\n', ' ')
-            url_match = re.search(r'(https://[a-zA-Z0-9.-]*transfer\.hennge\.com/[^\s"\'<>]+)', clean_body)
-
-            if url_match and not url:
                 raw_extracted_url = url_match.group(1)
                 url = raw_extracted_url.rstrip('。、.）」】)\] \t\r\n').rstrip('.')
                 url_msg_id = m['id']
@@ -533,7 +528,7 @@ def fetch_hennge_details(service, processed_label_id):
                 url_from = headers.get('from', '')
                 subject_text = subj
                 url_msg_timestamp = int(msg.get('internalDate', 0)) / 1000
-                
+
                 email_dt = datetime.datetime.fromtimestamp(url_msg_timestamp, JST)
                 email_info = {
                     'from': url_from,
@@ -556,7 +551,7 @@ def fetch_hennge_details(service, processed_label_id):
         url_dt = datetime.datetime.fromtimestamp(url_msg_timestamp)
         after_date = url_dt.strftime('%Y/%m/%d')
         before_date = (url_dt + datetime.timedelta(days=1)).strftime('%Y/%m/%d')
-        
+
         results_pass = service.users().messages().list(userId='me', q=f'(パスワード OR Password) after:{after_date} before:{before_date}', maxResults=50).execute()
         candidates = []
 
@@ -568,9 +563,9 @@ def fetch_hennge_details(service, processed_label_id):
             if time_diff > 7200 and m['id'] != url_msg_id: continue
 
             clean_body_pass = re.sub(r'<[^>]+>', ' ', get_email_body(msg['payload'])).replace('\r\n', '\n').replace('\r', '\n')
-            
+
             pat = r'(?:ファイルダウンロードパスワード|ファイルパスワード|ダウンロードパスワード|パスワード|Password)[:：]\s*\n?\s*([^\s]{12})'
-            
+
             for match_item in re.finditer(pat, clean_body_pass, re.IGNORECASE):
                 c_val = match_item.group(1).strip()
                 if not any(w in c_val.lower() for w in ["password", "japanese", "english", "hennge", "transfer", "http", "https"]):
@@ -700,7 +695,7 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
         for char in my_email:
             email_input.send_keys(char)
             time.sleep(0.02)
-            
+        
         driver.execute_script("arguments[0].blur();", email_input)
         time.sleep(0.5)
 
