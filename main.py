@@ -1,6 +1,6 @@
 import sys
 print("==========================================", flush=True)
-print("=== PERFECT_CODE_VERSION_V17_HYBRID_FINAL ===", flush=True)
+print("=== PERFECT_CODE_VERSION_V18_FIX_COLUMNS ===", flush=True)
 print("==========================================", flush=True)
 
 # coding: utf-8
@@ -26,6 +26,7 @@ import re
 import glob
 import base64
 import zipfile
+import unicodedata
 
 # PDF解析用ライブラリ
 from pdfminer.high_level import extract_pages
@@ -87,12 +88,12 @@ SCOPES = ['https://www.googleapis.com/auth/gmail.modify']
 
 # --- アプローチB: 項目名表記揺れ同義語辞書 ---
 COLUMN_ALIASES = {
-    'MID': ['物件id', 'mid', 'ｍｉｄ', 'id'],
-    '物件名': ['物件名', '件名', '物件', '建物名', '対象物件'],
-    '部屋番号': ['部屋番号', '号', '部番号', '番号', '部屋'],
-    '住所': ['物件住所', '住所', '所在地', '設置場所'],
+    'AL': ['有/解除番号有/無', '有/解除番号有', 'オートロックの有無', 'オートロック', 'al'],
+    '住所': ['物件住所', '設置場所', '所在地', '住所'],
+    'MID': ['物件id', 'mid', 'ｍｉｄ'],
+    '物件名': ['物件名', '建物名', '対象物件', '件名'],
+    '部屋番号': ['部屋番号', '部番号', '号室', '号', '部屋'],
     '管理人': ['管理員様在籍日時', '管理人駐在時間', '管理員様', '在籍日時', '管理人', '管理員', '管理'],
-    'AL': ['al', 'オートロック', '有/解除番号有/無', '有/解除番号有', 'オートロックの有無'],
     '備考': ['備考', 'メモ', '注意事項']
 }
 
@@ -120,13 +121,21 @@ def get_chrome_options():
 
 def identify_column_key(text):
     txt_clean = text.lower().replace(' ', '').replace(' ', '').replace('\n', '')
+    best_match_key = 'IGNORE'
+    max_len = 0
+    # 最も長く一致したキーワードを優先判定（「有/解除番号有/無」が「番号」に誤判定されるのを防止）
     for std_key, aliases in COLUMN_ALIASES.items():
-        if any(alias in txt_clean for alias in aliases):
-            return std_key
-    return 'IGNORE'
+        for alias in aliases:
+            if alias in txt_clean and len(alias) > max_len:
+                max_len = len(alias)
+                best_match_key = std_key
+    return best_match_key
 
 def is_address_text_strict(txt):
     txt_clean = re.sub(r'^\s*0\s*', '', txt.strip())
+    # 時間表記（9:00-17:00 等）が含まれる場合は住所ではない
+    if re.search(r'\d+:\d+', txt_clean) or re.search(r'\d+：\d+', txt_clean):
+        return False
     all_prefs = KANTO_PREFS + KANSAI_PREFS + ['東京都', '大阪府', '京都府', '兵庫県', '埼玉県', '千葉県', '神奈川県']
     if any(p in txt_clean for p in all_prefs):
         return True
@@ -495,11 +504,9 @@ def fetch_hennge_details(service, processed_label_id):
     email_info = None
     log_flush("Gmail APIに接続し、対象メールを検索中...")
     try:
-        # ▼ アカウント確認ログ
         my_profile = service.users().getProfile(userId='me').execute()
         log_flush(f"👤 接続中アカウント: {my_profile.get('emailAddress')}")
 
-        # ▼ 「停止」の単語指定を外し、「電力停止」ラベルから広く取得する
         search_query = 'label:電力停止 -label:処理済み'
         results_url = service.users().messages().list(userId='me', q=search_query, maxResults=50).execute()
         messages_url = results_url.get('messages', [])
@@ -512,7 +519,6 @@ def fetch_hennge_details(service, processed_label_id):
             subj = headers.get('subject', '')
             log_flush(f"🔎 チェック中: {subj}")
 
-            # ▼ 「停止」または「リスト」が含まれるものを対象とする
             if '停止' not in subj and 'リスト' not in subj:
                 continue
 
@@ -977,7 +983,10 @@ def process_pdf_data(pdf_path):
             obj_name = re.sub(r'^[「『"\'\s]+|[」』"\'\s]+$', '', obj_raw)
             obj_name = re.sub(r'([一-龠ぁ-んァ-ヶーA-Za-z0-9])\s+([一-龠ぁ-んァ-ヶーA-Za-z0-9])', r'\1\2', obj_name)
 
-            room_val = " ".join(field_vals['部屋番号'])
+            # 部屋番号の半角正規化（全角の３０４などを304にする）
+            raw_room = "".join(field_vals['部屋番号'])
+            room_val = unicodedata.normalize('NFKC', raw_room).replace(' ', '').replace(' ', '')
+
             addr_val = " ".join(field_vals['住所'])
             visit_val = "".join(field_vals['訪問'])
             kanri_val = " ".join(field_vals['管理人'])
