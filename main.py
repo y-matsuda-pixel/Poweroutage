@@ -495,18 +495,32 @@ def fetch_hennge_details(service, processed_label_id):
     email_info = None
     log_flush("Gmail APIに接続し、対象メールを検索中...")
     try:
-        search_query = 'label:電力停止 停止 -label:処理済み'
+        # ▼ アカウント確認ログ
+        my_profile = service.users().getProfile(userId='me').execute()
+        log_flush(f"👤 接続中アカウント: {my_profile.get('emailAddress')}")
+
+        # ▼ 「停止」の単語指定を外し、「電力停止」ラベルから広く取得する
+        search_query = 'label:電力停止 -label:処理済み'
         results_url = service.users().messages().list(userId='me', q=search_query, maxResults=50).execute()
         messages_url = results_url.get('messages', [])
-        
+
         log_flush(f"🔍 未処理メール検索件数: {len(messages_url)}件")
 
         for m in messages_url:
             msg = service.users().messages().get(userId='me', id=m['id']).execute()
             headers = {h['name'].lower(): h['value'] for h in msg['payload'].get('headers', [])}
             subj = headers.get('subject', '')
-            if '停止' not in subj: continue
+            log_flush(f"🔎 チェック中: {subj}")
 
+            # ▼ 「停止」または「リスト」が含まれるものを対象とする
+            if '停止' not in subj and 'リスト' not in subj:
+                continue
+
+            body = get_email_body(msg['payload'])
+            clean_body = re.sub(r'<[^>]+>', ' ', body).replace('\r\n', ' ').replace('\n', ' ')
+            url_match = re.search(r'(https://[a-zA-Z0-9.-]*transfer\.hennge\.com/[^\s"\'<>]+)', clean_body)
+
+            if url_match and not url:
             body = get_email_body(msg['payload'])
             clean_body = re.sub(r'<[^>]+>', ' ', body).replace('\r\n', ' ').replace('\n', ' ')
             url_match = re.search(r'(https://[a-zA-Z0-9.-]*transfer\.hennge\.com/[^\s"\'<>]+)', clean_body)
