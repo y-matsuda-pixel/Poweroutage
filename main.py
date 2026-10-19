@@ -1125,4 +1125,195 @@ def process_excel_data(excel_path):
             stop_count += 1
 
         extracted_data.append({
-            '停止
+            '停止or復旧': action_status,
+            '物件種別': current_type,
+            '物件名': obj_name,
+            '部屋番号': processed_room,
+            '住所': full_address,
+            'ＭＩＤ': mid_val,
+            '管理人': kanri_val,
+            'AL': al_status,
+            '備考': remark_val.replace('\n', ' ')
+        })
+
+    if not extracted_data:
+        return "対象データなし", 0, stop_count, recovery_count, "", None, []
+        
+    return create_output_csv(extracted_data, stop_count, recovery_count)
+
+def create_output_csv(extracted_data, stop_count, recovery_count):
+    REMARK_COL_2 = "レジル様記入備考" + " " * 52
+
+    ALL_HEADERS = [
+        'BLAS_データ管理番号', 'BLAS_担当会社', '停止or復旧', '物件種別', '物件名', 
+        '部屋番号※番号のみ入力', '物件住所', '工事会社', '作業者', '作業日', 
+        'メーター番号', '腕章は携帯しているか', '管理人駐在時間', '入館方法', 'オートロックの有無', 
+        'オートロック番号', 'スキルレススイッチの有無', '文書投函場所', '入館時刻', '停止・復電完了時刻', 
+        '退館時刻', 'ステータス', '脚立の必要有無', '脚立必要の場合：メーターの高さや必要な脚立の高さ', 
+        'パネルの有無', 'パネルありの場合：パネルの大きさやビス数、位置高さ', '鍵の必要有無', '鍵が必要な場合：必要な鍵', 
+        '【退館前】撮影写真に不備はないか', '【退館前】ゴミ・忘れものはしていないか', '駐車場', 
+        REMARK_COL_2, 
+        'BLAS_ゴミ箱', 'BLAS_データ未完了', 'BLAS_画像未完了', 'BLAS_親データ管理番号', 
+        '【協力会社のみ登録】腕章は携帯しているか', '【作業前】盤全景写真', '【作業前】', '【作業中】', 
+        '【作業後】', '【文書投函写真】', '予備1', '予備2', '予備3', '予備4', '予備5'
+    ]
+
+    stop_extracted_data = [d for d in extracted_data if d.get('停止or復旧') != '復旧']
+
+    final_rows = []
+    for idx, d in enumerate(stop_extracted_data):
+        row_dict = {h: '' for h in ALL_HEADERS}
+        row_dict['BLAS_データ管理番号'] = idx + 1
+        row_dict['BLAS_担当会社'] = FIXED_COMPANY_NAME
+        row_dict['停止or復旧'] = d['停止or復旧']
+        row_dict['物件種別'] = d['物件種別']
+        row_dict['物件名'] = d['物件名']
+        row_dict['部屋番号※番号のみ入力'] = d['部屋番号']
+        row_dict['物件住所'] = d['住所']
+        row_dict['工事会社'] = FIXED_COMPANY_NAME
+        row_dict['作業日'] = get_next_business_day().strftime('%Y/%m/%d')
+        
+        if d['物件種別'] == 'レジル':
+            row_dict['メーター番号'] = f"{d['ＭＩＤ']}-{d['部屋番号']}"
+        else:
+            row_dict['メーター番号'] = d['ＭＩＤ']
+            
+        row_dict['管理人駐在時間'] = d['管理人']
+        row_dict['オートロックの有無'] = d['AL']
+        row_dict['ステータス'] = '出向前'
+        
+        for c in ['腕章は携帯しているか', '入館方法', 'スキルレススイッチの有無', '脚立の必要有無', 'パネルの有無', '鍵の必要有無', '【退館前】撮影写真に不備はないか', '【退館前】ゴミ・忘れものはしていないか']:
+            row_dict[c] = '選択してください'
+        
+        row_dict[REMARK_COL_2] = d['備考']
+        final_rows.append(row_dict)
+
+    df_final = pd.DataFrame(final_rows, columns=ALL_HEADERS)
+    unique_csv_path = OUTPUT_CSV_PATH.parent / f"output_{datetime.datetime.now().strftime('%H%M%S')}.csv"
+    df_final.to_csv(unique_csv_path, index=False, encoding='utf-8-sig')
+    
+    first_address = extracted_data[0]['住所'] if extracted_data else ""
+    first_name = extracted_data[0]['物件名'] if extracted_data else "対象データ"
+    return first_name, len(df_final), stop_count, recovery_count, first_address, unique_csv_path, extracted_data
+
+# --- メイン処理 ---
+if __name__ == '__main__':
+    log_flush("=== 自動処理を開始します ===")
+    gmail_service = get_gmail_service()
+    processed_label_id = get_or_create_processed_label_id(gmail_service, "処理済み")
+    
+    target_url, password_candidates, subject_text, url_msg_id, email_info = fetch_hennge_details(gmail_service, processed_label_id)
+    
+    if not target_url or not password_candidates:
+        log_flush("有効な対象メールまたはパスワードが見つかりませんでした。処理を終了します。")
+        exit(0)
+        
+    downloaded_file_path, pass_msg_id, auth_msg_id = download_from_hennge(target_url, password_candidates, gmail_service, processed_label_id)
+    if not downloaded_file_path or not os.path.exists(downloaded_file_path):
+        log_flush("❌ ダウンロード失敗。終了します。", logging.ERROR)
+        exit(1)
+
+    if downloaded_file_path.lower().endswith('.zip'):
+        with zipfile.ZipFile(downloaded_file_path, 'r') as zip_ref:
+            zip_ref.extractall(DOWNLOAD_DIR)
+        os.remove(downloaded_file_path)
+
+    target_files = glob.glob(str(DOWNLOAD_DIR / '*.pdf')) + glob.glob(str(DOWNLOAD_DIR / '*.xlsx')) + glob.glob(str(DOWNLOAD_DIR / '*.xls'))
+    if not target_files:
+        log_flush("❌ PDF/Excelファイルが見つかりません。", logging.ERROR)
+        exit(1)
+
+    options = get_chrome_options()
+    driver = None
+    wait = None
+    try:
+        service_chrome = ChromeService(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service_chrome, options=options)
+        wait = WebDriverWait(driver, 30)
+
+        log_flush("BLASにログイン中...")
+        driver.get("https://www.basis-service.com/blas70/users/login")
+        wait.until(EC.presence_of_element_located((By.NAME, "username"))).send_keys(BASIS_USERNAME)
+        driver.find_element(By.NAME, "password").send_keys(BASIS_PASSWORD)
+        driver.find_element(By.XPATH, "//input[@type='submit']").click()
+        time.sleep(5)
+    except Exception as e:
+        log_flush(f"BLAS初期ログイン失敗: {e}", logging.ERROR)
+        if driver: driver.quit()
+        exit(1)
+
+    success_items = []
+    failure_items = []
+
+    for file_path in target_files:
+        file_name = os.path.basename(file_path)
+        try:
+            if file_path.lower().endswith('.pdf'):
+                p_name, p_count, s_count, r_count, p_addr, unique_csv_path, ext_data = process_pdf_data(file_path)
+            else:
+                p_name, p_count, s_count, r_count, p_addr, unique_csv_path, ext_data = process_excel_data(file_path)
+
+            detected_region = get_region_from_info(file_name, p_addr)
+
+            if ext_data:
+                write_to_lark_sheet(ext_data, detected_region)
+                write_email_to_lark_sheet(email_info)
+
+            if p_count == 0:
+                log_flush(f"⏭️ {file_name} には「停止」対象データがありませんでした（復旧データ {r_count}件 のLark転記完了）。")
+                os.remove(file_path)
+                continue
+
+            if TEST_CSV_ONLY:
+                continue
+
+            driver.get("https://www.basis-service.com/blas70/items")
+            wait.until(EC.element_to_be_clickable((By.CLASS_NAME, "select2-selection__arrow"))).click()
+            search_field = wait.until(EC.presence_of_element_located((By.CLASS_NAME, "select2-search__field")))
+            search_field.send_keys("【レジル】停止・復電業務")
+            time.sleep(2)
+            wait.until(EC.element_to_be_clickable((By.XPATH, "//li[contains(text(), '【レジル】停止・復電業務')]"))).click()
+            
+            wait.until(EC.element_to_be_clickable((By.XPATH, "//button[contains(.,'CSVインポート')]"))).click()
+            chk = wait.until(EC.presence_of_element_located((By.XPATH, "//input[@type='radio' and @value='1']")))
+            driver.execute_script("arguments[0].click();", chk)
+            
+            driver.find_element(By.XPATH, "//input[@type='file']").send_keys(os.path.abspath(unique_csv_path))
+            wait.until(EC.element_to_be_clickable((By.ID, "csv_import_btn"))).click()
+            
+            try:
+                WebDriverWait(driver, 5).until(EC.alert_is_present())
+                driver.switch_to.alert.accept()
+            except Exception: pass
+            
+            time.sleep(10)
+            
+            shutil.move(str(unique_csv_path), PROCESSED_DIR / f"output_{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}.csv")
+
+            os.remove(file_path)
+            
+            if p_count == 1:
+                display_name = f"{p_name}"
+            else:
+                display_name = f"{p_name}  外 ({p_count}件)"
+
+            success_items.append({
+                "name": display_name,
+                "region": detected_region
+            })
+            
+        except Exception as e:
+            log_flush(f"❌ エラーが発生しました ({file_name}): {e}", logging.ERROR)
+            failure_items.append((file_name, str(e)))
+
+    if driver:
+        driver.quit()
+
+    send_combined_lark_report(success_items, failure_items)
+
+    if not failure_items and success_items:
+        add_processed_label(gmail_service, [url_msg_id, pass_msg_id, auth_msg_id], processed_label_id)
+
+    log_flush("=== 全処理終了 ===")
+```<ElicitationsGroup>
+</ElicitationsGroup>
