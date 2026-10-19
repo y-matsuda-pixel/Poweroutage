@@ -1,6 +1,6 @@
 import sys
 print("==========================================", flush=True)
-print("=== PERFECT_CODE_VERSION_V19_FIX_HENNGE_AUTH ===", flush=True)
+print("=== PERFECT_CODE_VERSION_V20_FIX_AUTH_CODE ===", flush=True)
 print("==========================================", flush=True)
 
 # coding: utf-8
@@ -496,7 +496,7 @@ def get_email_body(payload):
                 elif mime_type == 'text/html' and not html_text: html_text = decoded
     extract_parts(payload)
     body = plain_text if plain_text else html_text
-    return body.replace('=\r\n', ' ').replace('=\n', ' ')
+    return body.replace('=\n', ' ').replace('=\r', ' ')
 
 def fetch_hennge_details(service, processed_label_id):
     url, subject_text = None, ""
@@ -523,12 +523,12 @@ def fetch_hennge_details(service, processed_label_id):
                 continue
 
             body = get_email_body(msg['payload'])
-            clean_body = re.sub(r'<[^>]+>', ' ', body).replace('\r\n', ' ').replace('\n', ' ')
+            clean_body = re.sub(r'<[^>]+>', ' ', body).replace('\n', ' ').replace('\r', ' ')
             url_match = re.search(r"https://[a-zA-Z0-9.-]*transfer\.hennge\.com/[a-zA-Z0-9_.~!*();:@&=+$,/?%#-]+", clean_body)
 
             if url_match and not url:
                 raw_extracted_url = url_match.group(0)
-                url = raw_extracted_url.rstrip('。、.）」】) \t\r\n').rstrip('.')
+                url = raw_extracted_url.rstrip('。、.）」】) \t\n\r').rstrip('.')
                 url_msg_id = m['id']
                 url_thread_id = msg.get('threadId', '')
                 url_from = headers.get('from', '')
@@ -593,17 +593,34 @@ def fetch_hennge_details(service, processed_label_id):
         return None, [], "", None, None
 
 def fetch_verification_code(service, start_timestamp, processed_label_id):
-    for _ in range(15):
+    query = '認証コード OR HENNGE OR 確認コード OR "Verification Code"'
+    for attempt in range(30):
         time.sleep(3)
         try:
-            results = service.users().messages().list(userId='me', q='認証コード OR HENNGE OR 確認コード', maxResults=5).execute()
+            results = service.users().messages().list(
+                userId='me',
+                q=query,
+                maxResults=5,
+                includeSpamTrash=True
+            ).execute()
             for m in results.get('messages', []):
                 msg = service.users().messages().get(userId='me', id=m['id']).execute()
-                if int(msg.get('internalDate', 0)) / 1000 >= start_timestamp - 10:
-                    clean_body = re.sub(r'<[^>]+>', ' ', get_email_body(msg['payload'])).replace('\r\n', ' ').replace('\n', ' ')
-                    code_match = re.search(r'\b(\d{6})\b', clean_body)
-                    if code_match: return code_match.group(1).strip(), m['id']
-        except Exception: pass
+                internal_date = int(msg.get('internalDate', 0)) / 1000
+                if internal_date >= start_timestamp - 60:
+                    headers = {h['name'].lower(): h['value'] for h in msg['payload'].get('headers', [])}
+                    subj = headers.get('subject', '')
+                    body = get_email_body(msg['payload'])
+                    clean_text = f"{subj} " + re.sub(r'<[^>]+>', ' ', body).replace('\n', ' ').replace('\r', ' ')
+                    code_match = re.search(r'\b(\d{6})\b', clean_text)
+                    if code_match:
+                        log_flush(f"📧 認証コードメール検知: [{subj}] (コード: {code_match.group(1)})")
+                        return code_match.group(1).strip(), m['id']
+                    else:
+                        log_flush(f"ℹ️ 新着メール検知も6桁コード見つからず: [{subj}]")
+        except Exception:
+            pass
+        if (attempt + 1) % 5 == 0:
+            log_flush(f"⏳ 認証コード待機中... ({(attempt + 1) * 3}秒経過)")
     return None, None
 
 def download_from_hennge(url, password_candidates, service, processed_label_id):
@@ -713,16 +730,25 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
         request_timestamp = time.time()
         
         log_flush("🔘 『認証コードを送信』ボタンをクリックします")
+        btn_clicked = False
         try:
-            send_code_btn = wait.until(EC.presence_of_element_located((By.XPATH, "//button[@type='submit' or contains(., '認証コード')]")))
-            driver.execute_script("arguments[0].removeAttribute('disabled');", send_code_btn)
-            try: send_code_btn.click()
-            except Exception: driver.execute_script("arguments[0].click();", send_code_btn)
+            btns = driver.find_elements(By.XPATH, "//button[@type='submit' or contains(., 'Next') or contains(., '認証コード') or contains(., '次へ') or contains(., 'Send') or contains(., '送信')] | //input[@type='submit']")
+            if btns:
+                driver.execute_script("arguments[0].removeAttribute('disabled');", btns[0])
+                try: btns[0].click()
+                except Exception: driver.execute_script("arguments[0].click();", btns[0])
+                btn_clicked = True
         except Exception as e:
-            log_flush(f"❌ 『認証コードを送信』ボタンが押せませんでした: {e}", logging.ERROR)
-            return None, None, None
+            log_flush(f"⚠️ 送信ボタンクリック試行エラー: {e}")
 
-        log_flush("⏳ Gmailから認証コード(6桁の数字)の受信を待機中...(最大約45秒)")
+        if not btn_clicked:
+            email_input.send_keys(Keys.RETURN)
+
+        time.sleep(3)
+        body_text_step2 = driver.find_element(By.TAG_NAME, "body").text.replace('\n', ' ')
+        log_flush(f"👀 送信ボタン押下後の画面テキスト(一部): {body_text_step2[:200]}")
+
+        log_flush("⏳ Gmailから認証コード(6桁の数字)の受信を待機中...(最大約90秒)")
         auth_code, auth_msg_id = fetch_verification_code(service, request_timestamp, processed_label_id)
         if not auth_code: 
             log_flush("❌ 認証コードがGmailに届きませんでした（タイムアウト）。", logging.ERROR)
@@ -746,7 +772,7 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
 
         log_flush("🔘 認証実行（フォーム送信）を行います")
         
-        js_code_submit = "const btns=document.querySelectorAll('button, input[type=\"submit\"], a'); for(let btn of btns){const txt=btn.innerText||btn.value||''; if(txt.includes('認証')||txt.includes('送信')||txt.includes('確認')||txt.includes('次へ')||btn.type==='submit'){btn.removeAttribute('disabled');btn.click();return true;}} return false;"
+        js_code_submit = "const btns=document.querySelectorAll('button, input[type=\"submit\"], a'); for(let btn of btns){const txt=btn.innerText||btn.value||''; if(txt.includes('認証')||txt.includes('送信')||txt.includes('確認')||txt.includes('次へ')||txt.includes('Next')||btn.type==='submit'){btn.removeAttribute('disabled');btn.click();return true;}} return false;"
         submitted = driver.execute_script(js_code_submit)
         
         if not submitted:
@@ -956,7 +982,6 @@ def process_pdf_data(pdf_path):
                     current_type = 'レジル'
 
             obj_raw = "".join(field_vals['物件名'])
-            
             obj_name = re.sub(r'^[「『"\'\s]+|[」』"\'\s]+$', '', obj_raw)
             obj_name = re.sub(r'([一-龠ぁ-んァ-ヶーA-Za-z0-9])\s+([一-龠ぁ-んァ-ヶーA-Za-z0-9])', r'\1\2', obj_name)
 
