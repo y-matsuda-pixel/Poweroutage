@@ -1,6 +1,6 @@
 import sys
 print("==========================================", flush=True)
-print("=== PERFECT_CODE_VERSION_V20_FIX_AUTH_CODE ===", flush=True)
+print("=== PERFECT_CODE_VERSION_V21_REACT_FIX ===", flush=True)
 print("==========================================", flush=True)
 
 # coding: utf-8
@@ -119,11 +119,36 @@ def get_chrome_options():
     options.add_experimental_option("prefs", prefs)
     return options
 
+def set_input_react(driver, el, val):
+    try:
+        el.click()
+    except Exception:
+        driver.execute_script("arguments[0].focus();", el)
+    time.sleep(0.1)
+    el.send_keys(Keys.CONTROL, "a")
+    el.send_keys(Keys.BACKSPACE)
+    time.sleep(0.1)
+    driver.execute_script("""
+        var el = arguments[0];
+        var val = arguments[1];
+        var prototype = Object.getPrototypeOf(el);
+        var setter = Object.getOwnPropertyDescriptor(prototype, 'value') ? Object.getOwnPropertyDescriptor(prototype, 'value').set : Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+        if (setter) {
+            setter.call(el, val);
+        } else {
+            el.value = val;
+        }
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+    """, el, val)
+    el.send_keys(Keys.SPACE)
+    el.send_keys(Keys.BACKSPACE)
+    time.sleep(0.2)
+
 def identify_column_key(text):
     txt_clean = text.lower().replace(' ', '').replace(' ', '').replace('\n', '')
     best_match_key = 'IGNORE'
     max_len = 0
-    # 最も長く一致したキーワードを優先判定
     for std_key, aliases in COLUMN_ALIASES.items():
         for alias in aliases:
             if alias in txt_clean and len(alias) > max_len:
@@ -133,7 +158,6 @@ def identify_column_key(text):
 
 def is_address_text_strict(txt):
     txt_clean = re.sub(r'^\s*0\s*', '', txt.strip())
-    # 時間表記（9:00-17:00 等）が含まれる場合は住所ではない
     if re.search(r'\d+:\d+', txt_clean) or re.search(r'\d+：\d+', txt_clean):
         return False
     all_prefs = KANTO_PREFS + KANSAI_PREFS + ['東京都', '大阪府', '京都府', '兵庫県', '埼玉県', '千葉県', '神奈川県']
@@ -496,7 +520,7 @@ def get_email_body(payload):
                 elif mime_type == 'text/html' and not html_text: html_text = decoded
     extract_parts(payload)
     body = plain_text if plain_text else html_text
-    return body.replace('=\n', ' ').replace('=\r', ' ')
+    return body.replace('=\r\n', ' ').replace('=\n', ' ')
 
 def fetch_hennge_details(service, processed_label_id):
     url, subject_text = None, ""
@@ -523,12 +547,12 @@ def fetch_hennge_details(service, processed_label_id):
                 continue
 
             body = get_email_body(msg['payload'])
-            clean_body = re.sub(r'<[^>]+>', ' ', body).replace('\n', ' ').replace('\r', ' ')
+            clean_body = re.sub(r'<[^>]+>', ' ', body).replace('\r\n', ' ').replace('\n', ' ')
             url_match = re.search(r"https://[a-zA-Z0-9.-]*transfer\.hennge\.com/[a-zA-Z0-9_.~!*();:@&=+$,/?%#-]+", clean_body)
 
             if url_match and not url:
                 raw_extracted_url = url_match.group(0)
-                url = raw_extracted_url.rstrip('。、.）」】) \t\n\r').rstrip('.')
+                url = raw_extracted_url.rstrip('。、.）」】) \t\r\n').rstrip('.')
                 url_msg_id = m['id']
                 url_thread_id = msg.get('threadId', '')
                 url_from = headers.get('from', '')
@@ -647,12 +671,12 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
 
         page_source = driver.page_source
         if "存在しません" in page_source or "見つかりません" in page_source or "Expired" in page_source or "拒否され" in page_source:
-            log_flush(f"❌ 画面エラー検知（アクセス拒否/リンク切れ/有効期限切れ）", logging.ERROR)
+            log_flush("❌ 画面エラー検知（アクセス拒否/リンク切れ/有効期限切れ）", logging.ERROR)
             return None, None, None
 
         email_input = None
         try:
-            email_input = driver.find_element(By.XPATH, "//input[@type='email' or contains(@placeholder, 'メールアドレス') or contains(@name, 'email')]")
+            email_input = driver.find_element(By.XPATH, "//input[@type='email' or contains(@placeholder, 'メールアドレス') or contains(@placeholder, 'Email') or contains(@name, 'email')]")
             log_flush("ℹ️ すでにステップ2（メールアドレス入力画面）が表示されています。パスワード入力をスキップします。")
         except Exception:
             pass
@@ -670,36 +694,25 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
             for idx, (score, cand_password, p_subj, p_date, p_msg_id, t_diff) in enumerate(password_candidates):
                 log_flush(f"🔑 パスワード入力試行中 ({idx + 1}/{len(password_candidates)}): {cand_password}")
                 
-                pass_input.send_keys(Keys.CONTROL + "a")
-                pass_input.send_keys(Keys.DELETE)
-                time.sleep(0.2)
-                
-                js_code_pass = "var el=arguments[0]; el.value=arguments[1]; el.dispatchEvent(new Event('input', {bubbles:true})); el.dispatchEvent(new Event('change', {bubbles:true}));"
-                driver.execute_script(js_code_pass, pass_input, cand_password)
-                
-                pass_input.send_keys(Keys.SPACE)
-                pass_input.send_keys(Keys.BACKSPACE)
-                
-                driver.execute_script("arguments[0].blur();", pass_input)
-                time.sleep(0.5)
+                set_input_react(driver, pass_input, cand_password)
                 
                 try:
-                    btns = driver.find_elements(By.XPATH, "//button[@type='submit' or contains(., '送信') or contains(., '次へ')] | //input[@type='submit']")
+                    btns = driver.find_elements(By.XPATH, "//button[@type='submit' or contains(., 'Next') or contains(., '次へ') or contains(., '送信')] | //input[@type='submit']")
                     if btns:
-                        try: btns[0].click()
-                        except Exception: driver.execute_script("arguments[0].click();", btns[0])
-                    else: pass_input.send_keys(Keys.RETURN)
+                        driver.execute_script("arguments[0].click();", btns[0])
+                    else:
+                        pass_input.send_keys(Keys.RETURN)
                 except Exception:
                     pass_input.send_keys(Keys.RETURN)
                 
                 time.sleep(2)
                 try:
                     email_input = WebDriverWait(driver, 8).until(
-                        EC.presence_of_element_located((By.XPATH, "//input[@type='email' or contains(@placeholder, 'メールアドレス') or contains(@name, 'email')]"))
+                        EC.presence_of_element_located((By.XPATH, "//input[@type='email' or contains(@placeholder, 'メールアドレス') or contains(@placeholder, 'Email') or contains(@name, 'email')]"))
                     )
                     successful_password = cand_password
                     successful_pass_msg_id = p_msg_id
-                    log_flush(f"✅ パスワード認証成功: 次の画面（メールアドレス入力）へ遷移しました")
+                    log_flush("✅ パスワード認証成功: 次の画面（メールアドレス入力）へ遷移しました")
                     break
                 except Exception:
                     body_text = driver.find_element(By.TAG_NAME, "body").text.replace('\n', ' ')
@@ -710,43 +723,48 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
                 return None, None, None
 
         if not email_input:
-            email_input = wait.until(EC.presence_of_element_located((By.XPATH, "//input[@type='email' or contains(@placeholder, 'メールアドレス') or contains(@name, 'email')]")))
+            email_input = wait.until(EC.presence_of_element_located((By.XPATH, "//input[@type='email' or contains(@placeholder, 'メールアドレス') or contains(@placeholder, 'Email') or contains(@name, 'email')]")))
 
         log_flush(f"✉️ メールアドレス入力試行: {my_email}")
-        
-        email_input.send_keys(Keys.CONTROL + "a")
-        email_input.send_keys(Keys.DELETE)
-        time.sleep(0.2)
-        
-        js_code_email = "var el=arguments[0]; el.value=arguments[1]; el.dispatchEvent(new Event('input', {bubbles:true})); el.dispatchEvent(new Event('change', {bubbles:true}));"
-        driver.execute_script(js_code_email, email_input, my_email)
-        
-        email_input.send_keys(Keys.SPACE)
-        email_input.send_keys(Keys.BACKSPACE)
-        
-        driver.execute_script("arguments[0].blur();", email_input)
+        set_input_react(driver, email_input, my_email)
         time.sleep(0.5)
 
         request_timestamp = time.time()
-        
         log_flush("🔘 『認証コードを送信』ボタンをクリックします")
-        btn_clicked = False
-        try:
+
+        step3_ready = False
+        code_input = None
+
+        for click_attempt in range(5):
             btns = driver.find_elements(By.XPATH, "//button[@type='submit' or contains(., 'Next') or contains(., '認証コード') or contains(., '次へ') or contains(., 'Send') or contains(., '送信')] | //input[@type='submit']")
-            if btns:
-                driver.execute_script("arguments[0].removeAttribute('disabled');", btns[0])
-                try: btns[0].click()
-                except Exception: driver.execute_script("arguments[0].click();", btns[0])
-                btn_clicked = True
-        except Exception as e:
-            log_flush(f"⚠️ 送信ボタンクリック試行エラー: {e}")
-
-        if not btn_clicked:
+            for b in btns:
+                try:
+                    if b.is_displayed():
+                        driver.execute_script("arguments[0].removeAttribute('disabled');", b)
+                        driver.execute_script("arguments[0].click();", b)
+                except Exception:
+                    pass
             email_input.send_keys(Keys.RETURN)
+            
+            for _ in range(3):
+                time.sleep(1)
+                all_text_inputs = driver.find_elements(By.XPATH, "//input[@type='text' or @type='number' or contains(@placeholder, 'code') or contains(@placeholder, 'コード') or contains(@name, 'code')]")
+                valid_code_inputs = [inp for inp in all_text_inputs if inp != email_input and inp.is_displayed()]
+                if valid_code_inputs:
+                    code_input = valid_code_inputs[0]
+                    step3_ready = True
+                    break
+                body_now = driver.find_element(By.TAG_NAME, "body").text
+                if "3 Enter Verification Code" in body_now or "コード" in body_now:
+                    step3_ready = True
+                    break
+            if step3_ready:
+                break
+            log_flush("ℹ️ 画面がステップ3（コード入力）へ切り替わっていません。再送信を試みます...")
+            set_input_react(driver, email_input, my_email)
 
-        time.sleep(3)
         body_text_step2 = driver.find_element(By.TAG_NAME, "body").text.replace('\n', ' ')
-        log_flush(f"👀 送信ボタン押下後の画面テキスト(一部): {body_text_step2[:200]}")
+        log_flush(f"👀 送信処理後の画面テキスト(一部): {body_text_step2[:200]}")
 
         log_flush("⏳ Gmailから認証コード(6桁の数字)の受信を待機中...(最大約90秒)")
         auth_code, auth_msg_id = fetch_verification_code(service, request_timestamp, processed_label_id)
@@ -756,26 +774,21 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
             
         log_flush(f"✅ 認証コードを受信しました: {auth_code}")
 
-        code_input = wait.until(EC.presence_of_element_located((By.XPATH, "//input[@type='text' or @type='number' or contains(@placeholder, 'コード') or contains(@name, 'code')]")))
-        code_input.clear()
+        if not code_input:
+            code_input = wait.until(EC.presence_of_element_located((By.XPATH, "//input[@type='text' or @type='number' or contains(@placeholder, 'コード') or contains(@placeholder, 'code') or contains(@name, 'code')]")))
         
         log_flush(f"🔢 認証コードを入力します: {auth_code}")
-        driver.execute_script("arguments[0].focus();", code_input)
-        
-        for char in auth_code:
-            code_input.send_keys(char)
-            time.sleep(0.05)
-            
-        js_code_dispatch = "var el=arguments[0]; el.dispatchEvent(new Event('input', {bubbles:true})); el.dispatchEvent(new Event('change', {bubbles:true})); el.dispatchEvent(new KeyboardEvent('keyup', {bubbles:true}));"
-        driver.execute_script(js_code_dispatch, code_input)
+        set_input_react(driver, code_input, auth_code)
         time.sleep(1)
 
         log_flush("🔘 認証実行（フォーム送信）を行います")
-        
-        js_code_submit = "const btns=document.querySelectorAll('button, input[type=\"submit\"], a'); for(let btn of btns){const txt=btn.innerText||btn.value||''; if(txt.includes('認証')||txt.includes('送信')||txt.includes('確認')||txt.includes('次へ')||txt.includes('Next')||btn.type==='submit'){btn.removeAttribute('disabled');btn.click();return true;}} return false;"
-        submitted = driver.execute_script(js_code_submit)
-        
-        if not submitted:
+        try:
+            btns = driver.find_elements(By.XPATH, "//button[@type='submit' or contains(., '認証') or contains(., '送信') or contains(., '確認') or contains(., '次へ') or contains(., 'Next')] | //input[@type='submit']")
+            if btns:
+                driver.execute_script("arguments[0].click();", btns[0])
+            else:
+                code_input.send_keys(Keys.RETURN)
+        except Exception:
             code_input.send_keys(Keys.RETURN)
 
         log_flush("⏳ 画面遷移（ファイル受信画面）を待機しています...")
@@ -804,7 +817,22 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
         log_flush("📥 『ダウンロード(Download)』ボタンをピンポイント探索してクリックします")
         
         download_clicked = False
-        js_code_download = "const targets=document.querySelectorAll('a[download], a[href*=\"download\"], button[aria-label*=\"Download\"], button[aria-label*=\"ダウンロード\"], tr td a, tr td button'); for(let el of targets){el.click(); return true;} const els=document.querySelectorAll('a, button, div[role=\"button\"]'); for(let el of els){const txt=(el.innerText||'').trim().toLowerCase(); if(txt==='download'||txt==='ダウンロード'){el.click(); return true;}} return false;"
+        js_code_download = """
+            var targets = document.querySelectorAll('a[download], a[href*="download"], button[aria-label*="Download"], button[aria-label*="ダウンロード"], tr td a, tr td button');
+            for(var i=0; i<targets.length; i++){
+                targets[i].click();
+                return true;
+            }
+            var els = document.querySelectorAll('a, button, div[role="button"]');
+            for(var j=0; j<els.length; j++){
+                var txt = (els[j].innerText || '').trim().toLowerCase();
+                if(txt === 'download' || txt === 'ダウンロード'){
+                    els[j].click();
+                    return true;
+                }
+            }
+            return false;
+        """
         for attempt in range(10):
             download_clicked = driver.execute_script(js_code_download)
             if download_clicked:
@@ -893,7 +921,6 @@ def process_pdf_data(pdf_path):
         if not h_map:
             continue
 
-        # MIDの探知
         mids = []
         ignore_words = ['物件id', 'mid', 'ｍｉｄ', 'レジル', '旧ハウス', '旧eハウス', '旧オリックス', '旧ntt-ae', 'esp', '電気停止訪問リスト']
         
@@ -940,7 +967,6 @@ def process_pdf_data(pdf_path):
                 if txt == mid_code or txt.startswith(mid_code) or "物件id" in txt or "訪問日" in txt:
                     continue
 
-                # 強制ルール: 明確な住所パターンの場合、X座標に関わらず住所へ分離格納
                 if is_address_text_strict(txt):
                     clean_addr = re.sub(r'^\s*0\s*', '', txt)
                     clean_addr = re.sub(r'^\s*\d{6}\s*', '', clean_addr)
@@ -985,7 +1011,6 @@ def process_pdf_data(pdf_path):
             obj_name = re.sub(r'^[「『"\'\s]+|[」』"\'\s]+$', '', obj_raw)
             obj_name = re.sub(r'([一-龠ぁ-んァ-ヶーA-Za-z0-9])\s+([一-龠ぁ-んァ-ヶーA-Za-z0-9])', r'\1\2', obj_name)
 
-            # 部屋番号の半角正規化（全角の３０４などを304にする）
             raw_room = "".join(field_vals['部屋番号'])
             room_val = unicodedata.normalize('NFKC', raw_room).replace(' ', '').replace(' ', '')
 
