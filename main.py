@@ -657,12 +657,8 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
                 pass_input.send_keys(Keys.DELETE)
                 time.sleep(0.2)
                 
-                driver.execute_script('''
-                    var el = arguments[0];
-                    el.value = arguments[1];
-                    el.dispatchEvent(new Event('input', { bubbles: true }));
-                    el.dispatchEvent(new Event('change', { bubbles: true }));
-                ''', pass_input, cand_password)
+                js_code_pass = "var el=arguments[0]; el.value=arguments[1]; el.dispatchEvent(new Event('input', {bubbles:true})); el.dispatchEvent(new Event('change', {bubbles:true}));"
+                driver.execute_script(js_code_pass, pass_input, cand_password)
                 
                 pass_input.send_keys(Keys.SPACE)
                 pass_input.send_keys(Keys.BACKSPACE)
@@ -705,12 +701,8 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
         email_input.send_keys(Keys.DELETE)
         time.sleep(0.2)
         
-        driver.execute_script('''
-            var el = arguments[0];
-            el.value = arguments[1];
-            el.dispatchEvent(new Event('input', { bubbles: true }));
-            el.dispatchEvent(new Event('change', { bubbles: true }));
-        ''', email_input, my_email)
+        js_code_email = "var el=arguments[0]; el.value=arguments[1]; el.dispatchEvent(new Event('input', {bubbles:true})); el.dispatchEvent(new Event('change', {bubbles:true}));"
+        driver.execute_script(js_code_email, email_input, my_email)
         
         email_input.send_keys(Keys.SPACE)
         email_input.send_keys(Keys.BACKSPACE)
@@ -748,28 +740,14 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
             code_input.send_keys(char)
             time.sleep(0.05)
             
-        driver.execute_script('''
-            var el = arguments[0];
-            el.dispatchEvent(new Event('input', { bubbles: true }));
-            el.dispatchEvent(new Event('change', { bubbles: true }));
-            el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
-        ''', code_input)
+        js_code_dispatch = "var el=arguments[0]; el.dispatchEvent(new Event('input', {bubbles:true})); el.dispatchEvent(new Event('change', {bubbles:true})); el.dispatchEvent(new KeyboardEvent('keyup', {bubbles:true}));"
+        driver.execute_script(js_code_dispatch, code_input)
         time.sleep(1)
 
         log_flush("🔘 認証実行（フォーム送信）を行います")
         
-        submitted = driver.execute_script('''
-            const btns = document.querySelectorAll('button, input[type="submit"], a');
-            for (let btn of btns) {
-                const txt = btn.innerText || btn.value || '';
-                if (txt.includes('認証') || txt.includes('送信') || txt.includes('確認') || txt.includes('次へ') || btn.type === 'submit') {
-                    btn.removeAttribute('disabled');
-                    btn.click();
-                    return true;
-                }
-            }
-            return false;
-        ''')
+        js_code_submit = "const btns=document.querySelectorAll('button, input[type=\"submit\"], a'); for(let btn of btns){const txt=btn.innerText||btn.value||''; if(txt.includes('認証')||txt.includes('送信')||txt.includes('確認')||txt.includes('次へ')||btn.type==='submit'){btn.removeAttribute('disabled');btn.click();return true;}} return false;"
+        submitted = driver.execute_script(js_code_submit)
         
         if not submitted:
             code_input.send_keys(Keys.RETURN)
@@ -800,24 +778,9 @@ def download_from_hennge(url, password_candidates, service, processed_label_id):
         log_flush("📥 『ダウンロード(Download)』ボタンをピンポイント探索してクリックします")
         
         download_clicked = False
+        js_code_download = "const targets=document.querySelectorAll('a[download], a[href*=\"download\"], button[aria-label*=\"Download\"], button[aria-label*=\"ダウンロード\"], tr td a, tr td button'); for(let el of targets){el.click(); return true;} const els=document.querySelectorAll('a, button, div[role=\"button\"]'); for(let el of els){const txt=(el.innerText||'').trim().toLowerCase(); if(txt==='download'||txt==='ダウンロード'){el.click(); return true;}} return false;"
         for attempt in range(10):
-            download_clicked = driver.execute_script('''
-                const targets = document.querySelectorAll('a[download], a[href*="download"], button[aria-label*="Download"], button[aria-label*="ダウンロード"], tr td a, tr td button');
-                for (let el of targets) {
-                    el.click();
-                    return true;
-                }
-                
-                const els = document.querySelectorAll('a, button, div[role="button"]');
-                for (let el of els) {
-                    const txt = (el.innerText || '').trim().toLowerCase();
-                    if (txt === 'download' || txt === 'ダウンロード') {
-                        el.click();
-                        return true;
-                    }
-                }
-                return false;
-            ''')
+            download_clicked = driver.execute_script(js_code_download)
             if download_clicked:
                 log_flush("✅ JavaScriptによる『ダウンロード(Download)』ボタンの直接クリックに成功しました。")
                 break
@@ -993,6 +956,7 @@ def process_pdf_data(pdf_path):
                     current_type = 'レジル'
 
             obj_raw = "".join(field_vals['物件名'])
+            
             obj_name = re.sub(r'^[「『"\'\s]+|[」』"\'\s]+$', '', obj_raw)
             obj_name = re.sub(r'([一-龠ぁ-んァ-ヶーA-Za-z0-9])\s+([一-龠ぁ-んァ-ヶーA-Za-z0-9])', r'\1\2', obj_name)
 
@@ -1309,5 +1273,3 @@ if __name__ == '__main__':
         add_processed_label(gmail_service, [url_msg_id, pass_msg_id, auth_msg_id], processed_label_id)
 
     log_flush("=== 全処理終了 ===")
-```<ElicitationsGroup>
-</ElicitationsGroup>
