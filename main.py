@@ -329,9 +329,9 @@ def write_to_lark_sheet(extracted_data, detected_region):
         except Exception as e:
             sheet_id = DEFAULT_SHEET_ID
 
-    read_url = f"https://open.larksuite.com/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}/values/{sheet_id}!B1:C500"
+    # 修正点：A列・B列を除外するため、C列(チーム)・D列(状態)で空行を判定します。
+    read_url = f"https://open.larksuite.com/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}/values/{sheet_id}!C1:D500"
     target_row = 4
-    last_no = 0
 
     try:
         res_read = requests.get(read_url, headers=headers, timeout=10)
@@ -342,24 +342,18 @@ def write_to_lark_sheet(extracted_data, detected_region):
             for idx, row_val in enumerate(values):
                 row_num = idx + 1
                 if row_num >= 4 and row_val:
-                    b_val = row_val[0] if len(row_val) > 0 else None
-                    c_val = row_val[1] if len(row_val) > 1 else None
+                    c_val = row_val[0] if len(row_val) > 0 else None
+                    d_val = row_val[1] if len(row_val) > 1 else None
                     
-                    b_str = str(b_val).strip() if b_val is not None else ""
                     c_str = str(c_val).strip() if c_val is not None else ""
+                    d_str = str(d_val).strip() if d_val is not None else ""
                     
-                    if c_str and c_str.lower() != 'none':
+                    if (c_str and c_str.lower() != 'none') or (d_str and d_str.lower() != 'none'):
                         last_filled_row = row_num
-                        if b_str and b_str.lower() != 'none':
-                            try: last_no = int(float(b_str))
-                            except ValueError: pass
 
             target_row = max(last_filled_row + 1, 4)
     except Exception as e:
         log_flush(f"空行判定エラー: {e}", logging.WARNING)
-
-    if last_no == 0 and target_row > 4:
-        last_no = target_row - 4
 
     next_biz_day = get_next_business_day().strftime('%Y/%m/%d')
     write_url = f"https://open.larksuite.com/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}/values"
@@ -368,39 +362,37 @@ def write_to_lark_sheet(extracted_data, detected_region):
     recovery_items = [d for d in extracted_data if d.get('停止or復旧') == '復旧']
 
     team = "ガスプラ課" if detected_region == "関東" else "西日本"
-    current_no = last_no
 
+    # 修正点：C列(チーム)〜J列(金額)に書き込むようにし、A列とB列には触れないようにしました。
     if stop_items:
-        current_no += 1
         kind = stop_items[0]['物件種別']
         action = "【停止】"
-        row_bj = [current_no, team, action, kind, "", next_biz_day, 1, 35000, 3500]
-        body_bj = {
+        row_cj = [team, action, kind, "", next_biz_day, 1, 35000, 3500]
+        body_cj = {
             "valueRange": {
-                "range": f"{sheet_id}!B{target_row}:J{target_row}",
-                "values": [row_bj]
+                "range": f"{sheet_id}!C{target_row}:J{target_row}",
+                "values": [row_cj]
             }
         }
         try:
-            requests.put(write_url, headers=headers, json=body_bj, timeout=10)
-            log_flush(f"📝 Larkシート [{target_sheet_title}] (行{target_row}, NO:{current_no}) に停止1行転記完了: {action} ({len(stop_items)}件分)")
+            requests.put(write_url, headers=headers, json=body_cj, timeout=10)
+            log_flush(f"📝 Larkシート [{target_sheet_title}] (行{target_row}) に停止1行転記完了: {action} ({len(stop_items)}件分)")
             target_row += 1
         except Exception as e:
             log_flush(f"Larkシート停止書き込み例外: {e}", logging.ERROR)
 
     for d in recovery_items:
-        current_no += 1
         action = "【復旧】"
         subject = f"{action}{d['物件名']} {d['部屋番号']}"
-        row_bj = [current_no, team, action, d['物件種別'], subject, next_biz_day, 1, 35000, 3500]
-        body_bj = {
+        row_cj = [team, action, d['物件種別'], subject, next_biz_day, 1, 35000, 3500]
+        body_cj = {
             "valueRange": {
-                "range": f"{sheet_id}!B{target_row}:J{target_row}",
-                "values": [row_bj]
+                "range": f"{sheet_id}!C{target_row}:J{target_row}",
+                "values": [row_cj]
             }
         }
         try:
-            requests.put(write_url, headers=headers, json=body_bj, timeout=10)
+            requests.put(write_url, headers=headers, json=body_cj, timeout=10)
             if d.get('備考'):
                 body_k = {
                     "valueRange": {
@@ -409,7 +401,7 @@ def write_to_lark_sheet(extracted_data, detected_region):
                     }
                 }
                 requests.put(write_url, headers=headers, json=body_k, timeout=10)
-            log_flush(f"📝 Larkシート [{target_sheet_title}] (行{target_row}, NO:{current_no}) に復旧転記完了: {subject}")
+            log_flush(f"📝 Larkシート [{target_sheet_title}] (行{target_row}) に復旧転記完了: {subject}")
             target_row += 1
         except Exception as e:
             log_flush(f"Larkシート復旧書き込み例外: {e}", logging.ERROR)
